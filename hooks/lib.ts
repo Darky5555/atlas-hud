@@ -1,0 +1,156 @@
+// Pure helpers: no `$`, so the tests can call them directly.
+import type { Limit, Step, Turn, Usage } from '../types'
+
+// Deep Space palette: dark ink panels, teal and gold accents.
+export const C = {
+  ink: '#0a0e16',
+  panel: '#131b2a',
+  panel2: '#1a2334',
+  line: '#2b3a56',
+  text: '#eef2f9',
+  text2: '#aab6cc',
+  teal: '#5fd3c0',
+  gold: '#e8c15c',
+  green: '#48b196',
+  orange: '#e8763c',
+  danger: '#e06070',
+} as const
+
+export const levelColor = (pct: number) =>
+  pct >= 90 ? C.danger : pct >= 75 ? C.gold : C.teal
+
+export const bar = (pct: number, cells = 16) => {
+  const filled = Math.max(0, Math.min(cells, Math.round((pct / 100) * cells)))
+  return '█'.repeat(filled) + '░'.repeat(cells - filled)
+}
+
+export const limitLabel = (kind: string) => {
+  const k = kind.toLowerCase()
+  if (k.includes('five') || k.includes('5h') || k === 'session') return '5-hour'
+  if (k.includes('opus')) return 'Weekly (Opus)'
+  if (k.includes('sonnet')) return 'Weekly (Sonnet)'
+  if (k.includes('seven') || k.includes('week')) return 'Weekly'
+  return kind.replace(/_/g, ' ')
+}
+
+export const shortLabel = (kind: string) =>
+  limitLabel(kind).replace('Weekly', 'wk').replace('5-hour', '5h')
+
+export const duration = (ms: number) => {
+  if (!Number.isFinite(ms) || ms <= 0) return 'now'
+  const m = Math.round(ms / 60000)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 48) return `${h}h ${m % 60}m`
+  return `${Math.floor(h / 24)}d ${h % 24}h`
+}
+
+export const resetsIn = (limit: Limit, now: number) =>
+  limit.resetsAt ? duration(Date.parse(limit.resetsAt) - now) : undefined
+
+/** Minutes until 100% at the pace of the last hour, or undefined if flat. */
+export const projectFull = (usage: Usage, kind: string, now: number) => {
+  const pts = usage.samples.filter(s => s.kind === kind && now - s.at <= 3_600_000)
+  const first = pts[0]
+  const last = pts.at(-1)
+  if (!first || !last || last.at - first.at < 5 * 60_000) return undefined
+  const rate = (last.pct - first.pct) / (last.at - first.at) // pct per ms
+  if (rate <= 0) return undefined
+  return (100 - last.pct) / rate
+}
+
+export const statusText = (usage: Usage) => {
+  const parts = usage.limits.map(l => `${shortLabel(l.kind)} ${Math.round(l.percentUsed)}%`)
+  if (usage.contextPercent !== undefined) parts.push(`ctx ${Math.round(usage.contextPercent)}%`)
+  if (usage.costUsd !== undefined) parts.push(`$${usage.costUsd.toFixed(2)}`)
+  return parts.length ? parts.join(' · ') : undefined
+}
+
+// ---------- Turn summaries ----------
+
+const base = (p: string) => p.split('/').filter(Boolean).at(-1) ?? p
+
+export const classify = (command: string): Step['kind'] => {
+  const c = command
+  if (/\b(vitest|jest|pytest|mocha|playwright test|go test|cargo test|npm (run )?test|node --test|plugin test)\b/.test(c)) return 'test'
+  if (/\b(npm run build|vite build|tsc\b|cargo build|next build|make\b)/.test(c)) return 'build'
+  if (/\b(audit|lint|eslint|lighthouse|curl|screenshot|chromium|playwright|plugin validate)\b/.test(c)) return 'check'
+  if (/\bgit (push)\b/.test(c)) return 'push'
+  if (/\bgit commit\b/.test(c)) return 'commit'
+  if (/\b(npm (i|install|ci)|pip install|yarn add|pnpm add)\b/.test(c)) return 'install'
+  if (/\bgit\b/.test(c)) return 'git'
+  return 'command'
+}
+
+const num = (s: string | undefined) => (s ? Number(s.replace(/,/g, '')) : 0)
+
+/** Pass/fail counts from vitest, jest, pytest or node --test output. */
+export const parseTests = (out: string) => {
+  const vitest = out.match(/Tests\s+(?:(\d[\d,]*) failed\s*\|\s*)?(\d[\d,]*) passed/)
+  if (vitest) return { passed: num(vitest[2]), failed: num(vitest[1]) }
+  const passed = out.match(/(\d[\d,]*) (?:passed|passing)/)
+  const failed = out.match(/(\d[\d,]*) (?:failed|failing)/)
+  if (passed || failed) return { passed: num(passed?.[1]), failed: num(failed?.[1]) }
+  return undefined
+}
+
+const list = (names: string[]) => {
+  const shown = names.slice(0, 3).map(base)
+  const more = names.length - shown.length
+  if (more > 0) return `${shown.join(', ')} and ${more} more`
+  if (shown.length <= 1) return shown.join('')
+  return `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}`
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`
+
+export const DONE_WORDS = /\b(done|fixed|works|working now|complete[d]?|ready|shipped|finished)\b/i
+
+/** Plain-English lines for one turn, built only from what the tools did. */
+export const describe = (t: Omit<Turn, 'lines'>): string[] => {
+  const out: string[] = []
+  if (t.created.length) out.push(`Created ${plural(t.created.length, 'file')}: ${list(t.created)}.`)
+  if (t.edited.length) out.push(`Changed ${plural(t.edited.length, 'file')}: ${list(t.edited)}.`)
+
+  const of = (k: Step['kind']) => t.steps.filter(s => s.kind === k)
+  const tests = of('test')
+  if (tests.length) {
+    if (t.tests) {
+      out.push(
+        t.tests.failed
+          ? `Ran the tests: ${t.tests.passed.toLocaleString('en-US')} passed, ${t.tests.failed.toLocaleString('en-US')} failed.`
+          : `Ran the tests: all ${t.tests.passed.toLocaleString('en-US')} passed.`,
+      )
+    } else out.push(tests.every(s => s.ok) ? 'Ran the tests and they passed.' : 'Ran the tests and something failed.')
+  }
+  const builds = of('build')
+  if (builds.length) out.push(builds.every(s => s.ok) ? 'Built the project without errors.' : 'Tried to build, and the build failed.')
+  const checks = of('check')
+  if (checks.length) out.push(`Ran ${plural(checks.length, 'check')} (audits, screenshots or live requests).`)
+  if (of('install').length) out.push('Installed packages.')
+  if (of('commit').length) out.push(of('commit').every(s => s.ok) ? 'Saved a commit.' : 'Tried to commit, and it failed.')
+  if (of('push').length) out.push(of('push').every(s => s.ok) ? 'Pushed to GitHub.' : 'Tried to push to GitHub, and it failed.')
+  const other = [...of('command'), ...of('git')]
+  if (other.length) {
+    const failed = other.filter(s => !s.ok).length
+    out.push(`Ran ${plural(other.length, 'other command')}${failed ? `, ${failed} failed` : ''}.`)
+  }
+  if (t.searches) out.push(`Searched the web ${plural(t.searches, 'time')}.`)
+  if (t.reads && !t.edited.length && !t.created.length) out.push(`Looked through ${plural(t.reads, 'file')} without changing any.`)
+  if (!out.length) out.push('Answered without changing anything.')
+  return out
+}
+
+/** Verified means a test, build or check ran after the last file change. */
+export const verdict = (t: Pick<Turn, 'edited' | 'created' | 'isVerified' | 'claimsDone'>) => {
+  const changed = t.edited.length + t.created.length > 0
+  if (!changed) return undefined
+  if (t.isVerified) return { tone: 'ok' as const, text: 'Checked: a test, build or check ran after the last change.' }
+  if (t.claimsDone) return { tone: 'warn' as const, text: 'Says done, but nothing was run to check the change.' }
+  return { tone: 'dim' as const, text: 'Not checked yet: no test, build or check after the last change.' }
+}
+
+export const DECISION = /<!--\s*decision:\s*([\s\S]+?)\s*-->/gi
+
+export const decisionsIn = (answer: string) =>
+  [...answer.matchAll(DECISION)].map(m => (m[1] ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)

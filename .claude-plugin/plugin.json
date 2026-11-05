@@ -1,0 +1,7 @@
+{
+  "name": "atlas-hud",
+  "version": "0.1.0",
+  "author": { "name": "darky5555" },
+  "description": "Usage gauges, task checklist, decisions log and plain-English change cards in a dark Deep Space theme.",
+  "types": "./types/index.d.ts"
+}

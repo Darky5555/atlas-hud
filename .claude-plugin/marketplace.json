@@ -1,0 +1,5 @@
+{
+  "name": "atlas-hud",
+  "owner": { "name": "darky5555" },
+  "plugins": [{ "name": "atlas-hud", "source": "./" }]
+}
