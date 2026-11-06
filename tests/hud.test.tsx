@@ -27,6 +27,13 @@ test('test counts parse from vitest and pytest output', async () => {
   expect(parseTests('nothing here')).toBe(undefined)
 })
 
+test('test counts parse from node --test output, spec and TAP', async () => {
+  const spec = '✔ adds (0.4ms)\n✖ subtracts (0.6ms)\nℹ tests 4\nℹ suites 0\nℹ pass 3\nℹ fail 1\nℹ cancelled 0\nℹ duration_ms 41.2'
+  expect(parseTests(spec)).toEqual({ passed: 3, failed: 1 })
+  const tap = 'TAP version 13\nok 1 - adds\n1..3\n# tests 3\n# suites 0\n# pass 3\n# fail 0\n# cancelled 0'
+  expect(parseTests(tap)).toEqual({ passed: 3, failed: 0 })
+})
+
 test('a turn is described in plain English, with no em dash', async () => {
   const lines = say({
     id: 't',

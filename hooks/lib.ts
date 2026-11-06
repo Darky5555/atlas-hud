@@ -86,6 +86,10 @@ const num = (s: string | undefined) => (s ? Number(s.replace(/,/g, '')) : 0)
 
 /** Pass/fail counts from vitest, jest, pytest or node --test output. */
 export const parseTests = (out: string) => {
+  // node --test summary lines: `ℹ pass 3` (spec reporter) or `# pass 3` (TAP).
+  const nodePass = out.match(/^[ℹ#]\s*pass\s+(\d[\d,]*)\s*$/m)
+  const nodeFail = out.match(/^[ℹ#]\s*fail\s+(\d[\d,]*)\s*$/m)
+  if (nodePass || nodeFail) return { passed: num(nodePass?.[1]), failed: num(nodeFail?.[1]) }
   const vitest = out.match(/Tests\s+(?:(\d[\d,]*) failed\s*\|\s*)?(\d[\d,]*) passed/)
   if (vitest) return { passed: num(vitest[2]), failed: num(vitest[1]) }
   const passed = out.match(/(\d[\d,]*) (?:passed|passing)/)
