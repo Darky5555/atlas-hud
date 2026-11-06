@@ -133,7 +133,7 @@ export const describe = (t: Omit<Turn, 'lines'>): string[] => {
   if (checks.length) out.push(`Ran ${plural(checks.length, 'check')} (audits, screenshots or live requests).`)
   if (of('install').length) out.push('Installed packages.')
   if (of('commit').length) out.push(of('commit').every(s => s.ok) ? 'Saved a commit.' : 'Tried to commit, and it failed.')
-  if (of('push').length) out.push(of('push').every(s => s.ok) ? 'Pushed to GitHub.' : 'Tried to push to GitHub, and it failed.')
+  if (of('push').length) out.push(of('push').every(s => s.ok) ? 'Pushed the branch.' : 'Tried to push the branch, and it failed.')
   const other = [...of('command'), ...of('git')]
   if (other.length) {
     const failed = other.filter(s => !s.ok).length

@@ -53,6 +53,24 @@ test('a turn is described in plain English, with no em dash', async () => {
   expect(lines.join(' ').includes(String.fromCharCode(0x2014))).toBe(false)
 })
 
+test('a push is described without naming a host', async () => {
+  const turn = (ok: boolean) =>
+    say({
+      id: 't',
+      at: 0,
+      durationMs: 1000,
+      edited: [],
+      created: [],
+      reads: 0,
+      searches: 0,
+      steps: [{ kind: 'push', label: 'git push origin main', ok }],
+      isVerified: false,
+      claimsDone: false,
+    })
+  expect(turn(true)).toEqual(['Pushed the branch.'])
+  expect(turn(false)).toEqual(['Tried to push the branch, and it failed.'])
+})
+
 test('says done without checking is flagged', async () => {
   const v = verdict({ edited: ['a.js'], created: [], isVerified: false, claimsDone: true })
   expect(v?.tone).toBe('warn')
