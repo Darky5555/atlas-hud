@@ -540,9 +540,9 @@ function decisionsView($: EngineInterface, Box: El, Text: El, Button: El, list: 
       {kept.length === 0 && <Text color={C.text2}>None yet. Kept decisions survive compaction.</Text>}
       {kept.map(d => (
         <Box flexDirection="row" justifyContent="space-between" gap={1}>
-          <Text color={C.text} flexShrink={1}>
-            · {d.text}
-          </Text>
+          <Box flexShrink={1}>
+            <Text color={C.text}>· {d.text}</Text>
+          </Box>
           <Button key={`rm-${d.id}`} label="Remove" plain dimColor onPress={() => set(d.id, 'drop')} />
         </Box>
       ))}

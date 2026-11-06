@@ -153,3 +153,21 @@ test('an edit with no check gets a card that says so, and tool rows get tags', a
     await row.unmount()
   }
 })
+
+test('pressing Keep still draws the Decisions tab', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  on('ui.toast', () => ({ value: undefined }))
+  on('turn.complete', (_, e) => ({ text: (e as { answer: string }).answer }))
+  await $.turn.complete({
+    answer: 'Okay.\n<!-- decision: no guards for now -->',
+    durationMs: 1000,
+    isAborted: false,
+    turnId: 'a',
+    reason: 'answer',
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'tab-decisions' })
+  await ui.press({ key: `keep-${NOW}-0` })
+  expect((await ui.find({ type: 'Text', text: /no guards/ }))?.text).toBe('· no guards for now')
+  await ui.unmount()
+})
