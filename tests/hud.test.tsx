@@ -148,7 +148,6 @@ test('a decision Claude proposes can be kept', async ($, on) => {
 test('an edit with no check gets a card that says so, and tool rows get tags', async ($, on) => {
   mock.clock(on, { now: NOW })
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.place', () => ({ value: { isPlaced: true as const, requestId: 'p' } }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('tool.call', () => ({ result: { type: 'update' } }))
