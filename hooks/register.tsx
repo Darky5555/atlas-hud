@@ -16,10 +16,10 @@ import {
   projectFull,
   resetsIn,
   statusText,
+  summaryText,
   verdict,
 } from './lib'
 
-const P = 'atlas-hud'
 const PANE = 'atlas-hud'
 const TITLE = 'Atlas HUD'
 
@@ -61,9 +61,6 @@ const freshAcc = (): Acc => ({
   lastChange: -1,
   lastCheck: -1,
 })
-
-// $.ui.place ids: 1 to 64 letters, digits, _ or -.
-const placeId = (turnId: string) => `turn-${turnId.replace(/[^A-Za-z0-9_-]/g, '').slice(-58)}`
 
 const str = (v: unknown) => (typeof v === 'string' ? v : '')
 
@@ -234,6 +231,7 @@ export const register: Register = on => {
       $.ui.toast(`Decision proposed: ${found[0]}`)
     }
 
+    let card: string | undefined
     const didWork = acc.seq > 0 || acc.steps.length > 0 || acc.reads > 0 || acc.searches > 0
     if (didWork && !e.isAborted) {
       const draft = {
@@ -251,14 +249,16 @@ export const register: Register = on => {
       }
       const turn: Turn = { ...draft, lines: describe(draft) }
       await update($, turns, l => [...l.filter(t => t.id !== turn.id), turn].slice(-30))
-      void $.ui.place({ id: placeId(turn.id) }).catch(() => undefined)
+      card = summaryText(turn)
       if (e.durationMs > 15_000) $.ui.toast(`Done · ${turn.lines[0] ?? 'turn finished'}`)
     } else if (!e.isAborted && e.durationMs > 15_000) {
       $.ui.toast('Done')
     }
 
     acc = freshAcc()
-    return next(e)
+    const r = await next(e)
+    // A text other than the answer is drawn beneath it, on every surface.
+    return card ? { ...r, text: card } : r
   })
 
   // ---------- Context: one small rule, and the compaction guard ----------
@@ -283,27 +283,6 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // ---------- Drawing ----------
-
-  on('ui.render', { component: 'Placed' }, async ($, e, next) => {
-    if (e.props.plugin !== P || !e.props.id.startsWith('turn-')) return next(e)
-    const turn = (await read($, turns)).find(t => placeId(t.id) === e.props.id)
-    if (!turn) return next(e)
-    const id = turn.id
-    const { Box, Text, Button } = $.ui.resolve(e)
-    return (
-      <Box flexDirection="column" borderStyle="round" borderColor={C.line} backgroundColor={C.panel} paddingX={1} gap={0}>
-        <Text mono size="caption" color={C.teal}>
-          WHAT CHANGED · {duration(turn.durationMs)}
-        </Text>
-        <TurnBody Box={Box} Text={Text} turn={turn} />
-        {turn.explain === undefined && (
-          <Box>
-            <Button key={`explain-${id}`} label="Explain in plain English" plain onPress={() => explain($, id)} />
-          </Box>
-        )}
-      </Box>
-    )
-  })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const row = await next(e)
@@ -363,40 +342,6 @@ function openPane($: EngineInterface) {
   return $.ui.open({ id: PANE, title: TITLE })
 }
 
-// ---------- Explain button: Haiku, only when pressed ----------
-
-async function explain($: EngineInterface, id: string) {
-  const turn = (await read($, turns)).find(t => t.id === id)
-  if (!turn) return
-  await update($, turns, l => l.map(t => (t.id === id ? { ...t, explainNote: 'Asking Haiku...' } : t)))
-  const facts = [
-    ...turn.lines,
-    ...turn.steps.map(s => `Command (${s.ok ? 'ok' : 'failed'}): ${s.label}`),
-    ...[...turn.edited, ...turn.created].map(f => `File: ${f}`),
-  ].join('\n')
-  const r = await $.model.complete({
-    model: 'haiku',
-    maxTokens: 160,
-    system:
-      'You explain what a coding assistant just did, for someone who is not a programmer. ' +
-      'Two short sentences, plain words, no jargon, no em dashes. Say what changed and why it might matter.',
-    prompt: facts,
-  })
-  await update($, turns, l =>
-    l.map(t =>
-      t.id !== id
-        ? t
-        : r.isAnswered
-          ? {
-              ...t,
-              explain: r.text.trim(),
-              explainNote: `Haiku · ${(r.usage.input_tokens + r.usage.output_tokens).toLocaleString('en-US')} tokens`,
-            }
-          : { ...t, explainNote: `Could not explain (${r.reason})` },
-    ),
-  )
-}
-
 // ---------- Views ----------
 
 type El = (props: any) => any
@@ -418,12 +363,6 @@ const TurnBody = ({ Box, Text, turn }: { Box: El; Text: El; turn: Turn }) => {
         <Text color={v.tone === 'ok' ? C.green : v.tone === 'warn' ? C.gold : C.text2} dimColor={v.tone === 'dim'}>
           {v.tone === 'ok' ? '✓ ' : v.tone === 'warn' ? '! ' : '· '}
           {v.text}
-        </Text>
-      )}
-      {turn.explain && <Text color={C.text2}>{turn.explain}</Text>}
-      {turn.explainNote && (
-        <Text mono size="caption" dimColor>
-          {turn.explainNote}
         </Text>
       )}
     </Box>
@@ -540,9 +479,9 @@ function decisionsView($: EngineInterface, Box: El, Text: El, Button: El, list: 
       {kept.length === 0 && <Text color={C.text2}>None yet. Kept decisions survive compaction.</Text>}
       {kept.map(d => (
         <Box flexDirection="row" justifyContent="space-between" gap={1}>
-          <Text color={C.text} flexShrink={1}>
-            · {d.text}
-          </Text>
+          <Box flexShrink={1}>
+            <Text color={C.text}>· {d.text}</Text>
+          </Box>
           <Button key={`rm-${d.id}`} label="Remove" plain dimColor onPress={() => set(d.id, 'drop')} />
         </Box>
       ))}

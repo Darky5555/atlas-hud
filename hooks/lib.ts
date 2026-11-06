@@ -86,6 +86,10 @@ const num = (s: string | undefined) => (s ? Number(s.replace(/,/g, '')) : 0)
 
 /** Pass/fail counts from vitest, jest, pytest or node --test output. */
 export const parseTests = (out: string) => {
+  // node --test summary lines: `ℹ pass 3` (spec reporter) or `# pass 3` (TAP).
+  const nodePass = out.match(/^[ℹ#]\s*pass\s+(\d[\d,]*)\s*$/m)
+  const nodeFail = out.match(/^[ℹ#]\s*fail\s+(\d[\d,]*)\s*$/m)
+  if (nodePass || nodeFail) return { passed: num(nodePass?.[1]), failed: num(nodeFail?.[1]) }
   const vitest = out.match(/Tests\s+(?:(\d[\d,]*) failed\s*\|\s*)?(\d[\d,]*) passed/)
   if (vitest) return { passed: num(vitest[2]), failed: num(vitest[1]) }
   const passed = out.match(/(\d[\d,]*) (?:passed|passing)/)
@@ -129,7 +133,7 @@ export const describe = (t: Omit<Turn, 'lines'>): string[] => {
   if (checks.length) out.push(`Ran ${plural(checks.length, 'check')} (audits, screenshots or live requests).`)
   if (of('install').length) out.push('Installed packages.')
   if (of('commit').length) out.push(of('commit').every(s => s.ok) ? 'Saved a commit.' : 'Tried to commit, and it failed.')
-  if (of('push').length) out.push(of('push').every(s => s.ok) ? 'Pushed to GitHub.' : 'Tried to push to GitHub, and it failed.')
+  if (of('push').length) out.push(of('push').every(s => s.ok) ? 'Pushed the branch.' : 'Tried to push the branch, and it failed.')
   const other = [...of('command'), ...of('git')]
   if (other.length) {
     const failed = other.filter(s => !s.ok).length
@@ -150,7 +154,14 @@ export const verdict = (t: Pick<Turn, 'edited' | 'created' | 'isVerified' | 'cla
   return { tone: 'dim' as const, text: 'Not checked yet: no test, build or check after the last change.' }
 }
 
-export const DECISION = /<!--\s*decision:\s*([\s\S]+?)\s*-->/gi
+/** The turn's summary as text: `turn.complete` shows it beneath the answer. */
+export const summaryText = (t: Turn) => {
+  const v = verdict(t)
+  const mark = v ? `${v.tone === 'ok' ? '✓' : v.tone === 'warn' ? '!' : '·'} ${v.text}` : undefined
+  return [`WHAT CHANGED · ${duration(t.durationMs)}`, ...t.lines, ...(mark ? [mark] : [])].join('\n')
+}
+
+export const DECISION =/<!--\s*decision:\s*([\s\S]+?)\s*-->/gi
 
 export const decisionsIn = (answer: string) =>
   [...answer.matchAll(DECISION)].map(m => (m[1] ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)

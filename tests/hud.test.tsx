@@ -27,6 +27,13 @@ test('test counts parse from vitest and pytest output', async () => {
   expect(parseTests('nothing here')).toBe(undefined)
 })
 
+test('test counts parse from node --test output, spec and TAP', async () => {
+  const spec = '✔ adds (0.4ms)\n✖ subtracts (0.6ms)\nℹ tests 4\nℹ suites 0\nℹ pass 3\nℹ fail 1\nℹ cancelled 0\nℹ duration_ms 41.2'
+  expect(parseTests(spec)).toEqual({ passed: 3, failed: 1 })
+  const tap = 'TAP version 13\nok 1 - adds\n1..3\n# tests 3\n# suites 0\n# pass 3\n# fail 0\n# cancelled 0'
+  expect(parseTests(tap)).toEqual({ passed: 3, failed: 0 })
+})
+
 test('a turn is described in plain English, with no em dash', async () => {
   const lines = say({
     id: 't',
@@ -44,6 +51,24 @@ test('a turn is described in plain English, with no em dash', async () => {
   expect(lines[0]).toBe('Changed 4 files: theme.css, a.js, b.js and 1 more.')
   expect(lines[1]).toBe('Ran the tests: 1,204 passed, 2 failed.')
   expect(lines.join(' ').includes(String.fromCharCode(0x2014))).toBe(false)
+})
+
+test('a push is described without naming a host', async () => {
+  const turn = (ok: boolean) =>
+    say({
+      id: 't',
+      at: 0,
+      durationMs: 1000,
+      edited: [],
+      created: [],
+      reads: 0,
+      searches: 0,
+      steps: [{ kind: 'push', label: 'git push origin main', ok }],
+      isVerified: false,
+      claimsDone: false,
+    })
+  expect(turn(true)).toEqual(['Pushed the branch.'])
+  expect(turn(false)).toEqual(['Tried to push the branch, and it failed.'])
 })
 
 test('says done without checking is flagged', async () => {
@@ -123,7 +148,6 @@ test('a decision Claude proposes can be kept', async ($, on) => {
 test('an edit with no check gets a card that says so, and tool rows get tags', async ($, on) => {
   mock.clock(on, { now: NOW })
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.place', () => ({ value: { isPlaced: true as const, requestId: 'p' } }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('tool.call', () => ({ result: { type: 'update' } }))
@@ -134,13 +158,23 @@ test('an edit with no check gets a card that says so, and tool rows get tags', a
 
   await $.turn.start({ text: 'fix it', turnId: 'k' })
   await $.tool.call({ tool: 'Edit', file_path: '/x/src/styles/theme.css', old_string: 'a', new_string: 'b' })
-  await $.turn.complete({ answer: 'Fixed, all done.', durationMs: 4000, isAborted: false, turnId: 'k', reason: 'answer' })
+  const done = await $.turn.complete({ answer: 'Fixed, all done.', durationMs: 4000, isAborted: false, turnId: 'k', reason: 'answer' })
+  // The summary is the text shown beneath the answer.
+  expect(done.text).toBe(
+    'WHAT CHANGED · 0m\nChanged 1 file: theme.css.\n! Says done, but nothing was run to check the change.',
+  )
+
+  // A turn that used no tools leaves the answer alone.
+  await $.turn.start({ text: 'thanks', turnId: 'q' })
+  const quiet = await $.turn.complete({ answer: 'Any time.', durationMs: 900, isAborted: false, turnId: 'q', reason: 'answer' })
+  expect(quiet.text).toBe('Any time.')
 
   for (const surface of SURFACES) {
-    const card = await $.ui.mount({ plugin: 'atlas-hud', component: 'Placed', props: { id: 'turn-k', plugin: 'atlas-hud' }, surface })
-    expect((await card.find({ type: 'Text', text: /^Changed/ }))?.text).toBe('Changed 1 file: theme.css.')
-    expect((await card.find({ type: 'Text', text: /nothing was run/ }))?.text).toBe('! Says done, but nothing was run to check the change.')
-    await card.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface })
+    await pane.press({ key: 'tab-changes' })
+    expect((await pane.find({ type: 'Text', text: /^Changed/ }))?.text).toBe('Changed 1 file: theme.css.')
+    await pane.press({ key: 'tab-usage' })
+    await pane.unmount()
 
     const row = await $.ui.mount({
       plugin: 'atlas-hud',
@@ -152,4 +186,22 @@ test('an edit with no check gets a card that says so, and tool rows get tags', a
     expect((await row.find({ type: 'Text', text: /TEST/ }))?.text).toBe('TEST')
     await row.unmount()
   }
+})
+
+test('pressing Keep still draws the Decisions tab', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  on('ui.toast', () => ({ value: undefined }))
+  on('turn.complete', (_, e) => ({ text: (e as { answer: string }).answer }))
+  await $.turn.complete({
+    answer: 'Okay.\n<!-- decision: no guards for now -->',
+    durationMs: 1000,
+    isAborted: false,
+    turnId: 'a',
+    reason: 'answer',
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'tab-decisions' })
+  await ui.press({ key: `keep-${NOW}-0` })
+  expect((await ui.find({ type: 'Text', text: /no guards/ }))?.text).toBe('· no guards for now')
+  await ui.unmount()
 })
