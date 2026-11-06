@@ -7,14 +7,13 @@ A Claude Code mod in a dark Deep Space theme: ink panels, teal and gold accents.
 - **Decisions**: decisions Claude proposes (in a hidden comment at the end of a reply), which you Keep or Drop.
 - **Changes**: a plain-English summary of each turn: files changed, tests passed and failed, builds, commits, pushes, and whether anything was run to check the change.
 
-Each turn that used tools also gets a summary card in the transcript, with an "Explain in plain English" button that asks Haiku only when pressed. Tool rows get small tags (EDIT, TEST, PUSH and so on).
+Each turn that used tools also gets the same summary as plain text beneath Claude's reply. Tool rows get small tags (EDIT, TEST, PUSH and so on).
 
 ## Token cost
 
-- Gauges, tasks, cards, badges, toasts: zero tokens. They are drawn from data the engine already has.
+- Gauges, tasks, turn summaries, badges, toasts: zero tokens. They are drawn from data the engine already has.
 - Decision proposals: one system-prompt line, about 45 tokens per turn, served from the prompt cache after the first turn.
 - Compaction guard: open tasks and kept decisions are added to the compaction instructions, once per compaction.
-- Explain button: about 300 tokens of Haiku per press, shown on the card.
 
 ## Install
 

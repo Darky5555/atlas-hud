@@ -44,8 +44,6 @@ export type Turn = {
   isVerified: boolean
   claimsDone: boolean
   lines: string[]
-  explain?: string
-  explainNote?: string
 }
 
 export type Tab = 'usage' | 'tasks' | 'decisions' | 'changes'

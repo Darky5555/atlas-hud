@@ -154,7 +154,14 @@ export const verdict = (t: Pick<Turn, 'edited' | 'created' | 'isVerified' | 'cla
   return { tone: 'dim' as const, text: 'Not checked yet: no test, build or check after the last change.' }
 }
 
-export const DECISION = /<!--\s*decision:\s*([\s\S]+?)\s*-->/gi
+/** The turn's summary as text: `turn.complete` shows it beneath the answer. */
+export const summaryText = (t: Turn) => {
+  const v = verdict(t)
+  const mark = v ? `${v.tone === 'ok' ? '✓' : v.tone === 'warn' ? '!' : '·'} ${v.text}` : undefined
+  return [`WHAT CHANGED · ${duration(t.durationMs)}`, ...t.lines, ...(mark ? [mark] : [])].join('\n')
+}
+
+export const DECISION =/<!--\s*decision:\s*([\s\S]+?)\s*-->/gi
 
 export const decisionsIn = (answer: string) =>
   [...answer.matchAll(DECISION)].map(m => (m[1] ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)

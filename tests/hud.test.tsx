@@ -158,13 +158,23 @@ test('an edit with no check gets a card that says so, and tool rows get tags', a
 
   await $.turn.start({ text: 'fix it', turnId: 'k' })
   await $.tool.call({ tool: 'Edit', file_path: '/x/src/styles/theme.css', old_string: 'a', new_string: 'b' })
-  await $.turn.complete({ answer: 'Fixed, all done.', durationMs: 4000, isAborted: false, turnId: 'k', reason: 'answer' })
+  const done = await $.turn.complete({ answer: 'Fixed, all done.', durationMs: 4000, isAborted: false, turnId: 'k', reason: 'answer' })
+  // The summary is the text shown beneath the answer.
+  expect(done.text).toBe(
+    'WHAT CHANGED · 0m\nChanged 1 file: theme.css.\n! Says done, but nothing was run to check the change.',
+  )
+
+  // A turn that used no tools leaves the answer alone.
+  await $.turn.start({ text: 'thanks', turnId: 'q' })
+  const quiet = await $.turn.complete({ answer: 'Any time.', durationMs: 900, isAborted: false, turnId: 'q', reason: 'answer' })
+  expect(quiet.text).toBe('Any time.')
 
   for (const surface of SURFACES) {
-    const card = await $.ui.mount({ plugin: 'atlas-hud', component: 'Placed', props: { id: 'turn-k', plugin: 'atlas-hud' }, surface })
-    expect((await card.find({ type: 'Text', text: /^Changed/ }))?.text).toBe('Changed 1 file: theme.css.')
-    expect((await card.find({ type: 'Text', text: /nothing was run/ }))?.text).toBe('! Says done, but nothing was run to check the change.')
-    await card.unmount()
+    const pane = await $.ui.mount({ ...PANE, surface })
+    await pane.press({ key: 'tab-changes' })
+    expect((await pane.find({ type: 'Text', text: /^Changed/ }))?.text).toBe('Changed 1 file: theme.css.')
+    await pane.press({ key: 'tab-usage' })
+    await pane.unmount()
 
     const row = await $.ui.mount({
       plugin: 'atlas-hud',
