@@ -120,9 +120,9 @@ test('tasks from TaskCreate and TaskUpdate show in the Tasks tab', async ($, on)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    await ui.press({ key: 'tab-tasks' })
+    await ui.press({ key: 'tab-work' })
     expect((await ui.find({ type: 'Text', text: /Build the HUD/ }))?.text).toBe('▸ Build the HUD')
-    await ui.press({ key: 'tab-usage' })
+    await ui.press({ key: 'tab-overview' })
     await ui.unmount()
   }
 })
@@ -140,7 +140,7 @@ test('a decision Claude proposes can be kept', async ($, on) => {
   })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'mobile' })
-  await ui.press({ key: 'tab-decisions' })
+  await ui.press({ key: 'tab-work' })
   expect((await ui.find({ type: 'Text', text: /no guards/ }))?.text).toBe('no guards for now')
   await ui.unmount()
 })
@@ -171,9 +171,9 @@ test('an edit with no check gets a card that says so, and tool rows get tags', a
 
   for (const surface of SURFACES) {
     const pane = await $.ui.mount({ ...PANE, surface })
-    await pane.press({ key: 'tab-changes' })
+    await pane.press({ key: 'tab-timeline' })
     expect((await pane.find({ type: 'Text', text: /^Changed/ }))?.text).toBe('Changed 1 file: theme.css.')
-    await pane.press({ key: 'tab-usage' })
+    await pane.press({ key: 'tab-overview' })
     await pane.unmount()
 
     const row = await $.ui.mount({
@@ -200,7 +200,7 @@ test('pressing Keep still draws the Decisions tab', async ($, on) => {
     reason: 'answer',
   })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'tab-decisions' })
+  await ui.press({ key: 'tab-work' })
   await ui.press({ key: `keep-${NOW}-0` })
   expect((await ui.find({ type: 'Text', text: /no guards/ }))?.text).toBe('· no guards for now')
   await ui.unmount()
@@ -240,10 +240,10 @@ test('plan calls show in the Tasks tab', async ($, on) => {
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    await ui.press({ key: 'tab-tasks' })
+    await ui.press({ key: 'tab-work' })
     expect((await ui.find({ type: 'Text', text: /1 OF 2 DONE/ }))?.text).toBe('1 OF 2 DONE')
     expect((await ui.find({ type: 'Text', text: /Ship it/ }))?.text).toBe('▸ Ship it')
-    await ui.press({ key: 'tab-usage' })
+    await ui.press({ key: 'tab-overview' })
     await ui.unmount()
   }
 })

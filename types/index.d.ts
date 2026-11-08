@@ -46,7 +46,24 @@ export type Turn = {
   lines: string[]
 }
 
-export type Tab = 'usage' | 'tasks' | 'decisions' | 'changes'
+export type Tab = 'overview' | 'work' | 'agents' | 'timeline'
+
+// ---- Agents feature types (agents.tsx) ----
+
+
+
+// ---- Git feature types (git.tsx) ----
+
+
+
+// ---- Timeline feature types (timeline.tsx) ----
+
+
+
+// ---- Theme feature types (icons.tsx, chrome.tsx, transcript.tsx) ----
+
+
+
 
 declare module 'claude-code' {
   interface PluginState {
@@ -56,6 +73,19 @@ declare module 'claude-code' {
       decisions: Shaped<Decision[]>
       turns: Shaped<Turn[]>
       tab: Tab
+
+      // ---- Agents feature state ----
+
+
+      // ---- Git feature state ----
+
+
+      // ---- Timeline feature state ----
+
+
+      // ---- Theme feature state ----
+
+
     }
   }
 }

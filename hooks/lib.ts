@@ -1,20 +1,9 @@
 // Pure helpers: no `$`, so the tests can call them directly.
 import type { Decision, Limit, Step, Task, Turn, Usage } from '../types'
 
-// Deep Space palette: dark ink panels, teal and gold accents.
-export const C = {
-  ink: '#0a0e16',
-  panel: '#131b2a',
-  panel2: '#1a2334',
-  line: '#2b3a56',
-  text: '#eef2f9',
-  text2: '#aab6cc',
-  teal: '#5fd3c0',
-  gold: '#e8c15c',
-  green: '#48b196',
-  orange: '#e8763c',
-  danger: '#e06070',
-} as const
+import { C } from './ui/theme'
+
+export { C }
 
 export const levelColor = (pct: number) =>
   pct >= 90 ? C.danger : pct >= 75 ? C.gold : C.teal
