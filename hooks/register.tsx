@@ -5,11 +5,15 @@ import type { Decision, Step, Tab, Task, Turn, Usage } from '../types'
 import {
   C,
   DONE_WORDS,
+  PLAN_TOOL,
+  WRAP_TOOL,
+  applyPlan,
   bar,
   classify,
   decisionsIn,
   describe,
   duration,
+  keptSection,
   levelColor,
   limitLabel,
   parseTests,
@@ -18,6 +22,7 @@ import {
   statusText,
   summaryText,
   verdict,
+  wrapPlan,
 } from './lib'
 
 const PANE = 'atlas-hud'
@@ -197,6 +202,10 @@ export const register: Register = on => {
                 : t,
             ),
       )
+    } else if (tool === PLAN_TOOL && ok) {
+      await update($, tasks, l => applyPlan(l, input))
+    } else if (tool === WRAP_TOOL && ok) {
+      await update($, tasks, wrapPlan)
     } else if (tool === 'TodoWrite' && ok) {
       const todos = (Array.isArray(input.todos) ? input.todos : []) as Record<string, unknown>[]
       await update($, tasks, () =>
@@ -265,7 +274,14 @@ export const register: Register = on => {
 
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
-    return { sections: [...r.sections, { id: 'atlas-hud-decisions', text: DECISION_RULE, scope: 'session' as const }] }
+    const kept = keptSection(await read($, decisions))
+    return {
+      sections: [
+        ...r.sections,
+        { id: 'atlas-hud-decisions', text: DECISION_RULE, scope: 'session' as const },
+        ...(kept ? [{ id: 'atlas-hud-kept-decisions', text: kept, scope: 'session' as const }] : []),
+      ],
+    }
   })
 
   on('session.compact', async ($, e, next) => {
@@ -283,6 +299,27 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // ---------- Drawing ----------
+
+  // Claude's newest proposal waits above the prompt, so it is kept or dropped
+  // without opening the pane.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const proposed = (await read($, decisions)).filter(d => d.status === 'proposed')
+    const d = proposed.at(-1)
+    if (!d) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" flexWrap="wrap" gap={1} borderStyle="round" borderColor={C.gold} paddingX={1}>
+        <Text mono size="caption" color={C.gold}>
+          DECISION
+        </Text>
+        <Text color={C.text}>{d.text}</Text>
+        <Button key={`band-keep-${d.id}`} label="Keep" variant="primary" onPress={() => setDecision($, d.id, 'kept')} />
+        <Button key={`band-drop-${d.id}`} label="Drop" onPress={() => setDecision($, d.id, 'drop')} />
+        {proposed.length > 1 && <Text color={C.text2}>+{proposed.length - 1} more in /hud</Text>}
+      </Box>
+    )
+  })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     const row = await next(e)
@@ -340,6 +377,10 @@ export const register: Register = on => {
 
 function openPane($: EngineInterface) {
   return $.ui.open({ id: PANE, title: TITLE })
+}
+
+function setDecision($: EngineInterface, id: string, status: Decision['status'] | 'drop') {
+  return update($, decisions, l => (status === 'drop' ? l.filter(d => d.id !== id) : l.map(d => (d.id === id ? { ...d, status } : d))))
 }
 
 // ---------- Views ----------
@@ -461,8 +502,7 @@ async function tasksView($: EngineInterface, Box: El, Text: El) {
 function decisionsView($: EngineInterface, Box: El, Text: El, Button: El, list: Decision[]) {
   const proposed = list.filter(d => d.status === 'proposed')
   const kept = list.filter(d => d.status === 'kept')
-  const set = (id: string, status: Decision['status'] | 'drop') =>
-    update($, decisions, l => (status === 'drop' ? l.filter(d => d.id !== id) : l.map(d => (d.id === id ? { ...d, status } : d))))
+  const set = (id: string, status: Decision['status'] | 'drop') => setDecision($, id, status)
   return (
     <Box flexDirection="column" gap={1}>
       {proposed.length > 0 && <Heading Text={Text}>CLAUDE PROPOSES</Heading>}

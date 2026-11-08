@@ -1,5 +1,5 @@
 // Pure helpers: no `$`, so the tests can call them directly.
-import type { Limit, Step, Turn, Usage } from '../types'
+import type { Decision, Limit, Step, Task, Turn, Usage } from '../types'
 
 // Deep Space palette: dark ink panels, teal and gold accents.
 export const C = {
@@ -165,3 +165,53 @@ export const DECISION =/<!--\s*decision:\s*([\s\S]+?)\s*-->/gi
 
 export const decisionsIn = (answer: string) =>
   [...answer.matchAll(DECISION)].map(m => (m[1] ?? '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+
+// ---------- The desktop app's plan tool ----------
+
+export const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
+export const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
+
+const planStatus = (s: unknown): Task['status'] => (s === 'in_progress' || s === 'completed' ? s : 'pending')
+const isPlan = (t: Task) => t.id.startsWith('plan-')
+
+/**
+ * The task list after one plan call: `items` replaces the plan, `advance`
+ * completes the step in progress and starts the next pending one, and `done`
+ * / `start` (1-based) set steps by number. Tasks from other tools stay.
+ */
+export const applyPlan = (list: Task[], input: Record<string, unknown>): Task[] => {
+  if (Array.isArray(input.items)) {
+    const plan = input.items.slice(0, 60).map((it, i) => {
+      const o = (it ?? {}) as Record<string, unknown>
+      return { id: `plan-${i + 1}`, subject: typeof o.content === 'string' ? o.content : '', status: planStatus(o.status) }
+    })
+    return [...list.filter(t => !isPlan(t)), ...plan]
+  }
+  let out = list
+  const set = (n: number, status: Task['status']) => {
+    out = out.map(t => (t.id === `plan-${n}` ? { ...t, status } : t))
+  }
+  if (input.advance === true) {
+    const plan = out.filter(isPlan)
+    const at = plan.findIndex(t => t.status === 'in_progress')
+    if (at >= 0) set(at + 1, 'completed')
+    const nextAt = plan.findIndex((t, i) => i > at && t.status === 'pending')
+    if (nextAt >= 0) set(nextAt + 1, 'in_progress')
+  }
+  if (Array.isArray(input.done)) for (const n of input.done) if (typeof n === 'number') set(n, 'completed')
+  if (typeof input.start === 'number') set(input.start, 'in_progress')
+  return out
+}
+
+/** Wrapping up checks off the plan step still in progress. */
+export const wrapPlan = (list: Task[]): Task[] =>
+  list.map(t => (isPlan(t) && t.status === 'in_progress' ? { ...t, status: 'completed' as const } : t))
+
+// ---------- Kept decisions, sent to Claude ----------
+
+/** The system-prompt text for the decisions the user kept, or undefined with none. */
+export const keptSection = (list: Decision[]) => {
+  const kept = list.filter(d => d.status === 'kept').slice(-20)
+  if (!kept.length) return undefined
+  return `Decisions the user has agreed to for this work. Follow them unless the user changes one:\n${kept.map(d => `- ${d.text}`).join('\n')}`
+}

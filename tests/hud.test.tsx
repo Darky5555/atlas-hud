@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 const NOW = Date.parse('2026-11-05T12:00:00Z')
 
-import { decisionsIn, describe as say, parseTests, verdict } from '../hooks/lib'
+import { applyPlan, decisionsIn, describe as say, keptSection, parseTests, verdict, wrapPlan } from '../hooks/lib'
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 
@@ -204,4 +204,86 @@ test('pressing Keep still draws the Decisions tab', async ($, on) => {
   await ui.press({ key: `keep-${NOW}-0` })
   expect((await ui.find({ type: 'Text', text: /no guards/ }))?.text).toBe('· no guards for now')
   await ui.unmount()
+})
+
+test('the desktop plan tool fills the task list, step by step', async () => {
+  const items = [
+    { content: 'Read the code', status: 'in_progress' },
+    { content: 'Fix it', status: 'pending' },
+    { content: 'Run the tests', status: 'pending' },
+  ]
+  const other = { id: '7', subject: 'From TaskCreate', status: 'pending' as const }
+  let list = applyPlan([other], { items, scope: 'first_task' })
+  expect(list.map(t => `${t.id}:${t.status}`)).toEqual(['7:pending', 'plan-1:in_progress', 'plan-2:pending', 'plan-3:pending'])
+  list = applyPlan(list, { advance: true })
+  expect(list.filter(t => t.id.startsWith('plan-')).map(t => t.status)).toEqual(['completed', 'in_progress', 'pending'])
+  list = applyPlan(list, { done: [2], start: 3 })
+  expect(list.filter(t => t.id.startsWith('plan-')).map(t => t.status)).toEqual(['completed', 'completed', 'in_progress'])
+  list = wrapPlan(list)
+  expect(list.every(t => t.id === '7' || t.status === 'completed')).toBe(true)
+  // A new plan replaces the old one and keeps other tasks.
+  list = applyPlan(list, { items: [{ content: 'Next thing', status: 'in_progress' }] })
+  expect(list.map(t => t.subject)).toEqual(['From TaskCreate', 'Next thing'])
+})
+
+test('plan calls show in the Tasks tab', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  on('tool.call', () => ({ result: { content: [{ type: 'text', text: 'Plan shown.' }] } }))
+  await $.tool.call({
+    tool: 'mcp__ccd_turn__update_plan',
+    items: [
+      { content: 'Look at the setup', status: 'in_progress' },
+      { content: 'Ship it', status: 'pending' },
+    ],
+  })
+  await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab-tasks' })
+    expect((await ui.find({ type: 'Text', text: /1 OF 2 DONE/ }))?.text).toBe('1 OF 2 DONE')
+    expect((await ui.find({ type: 'Text', text: /Ship it/ }))?.text).toBe('▸ Ship it')
+    await ui.press({ key: 'tab-usage' })
+    await ui.unmount()
+  }
+})
+
+test('a proposed decision waits above the prompt and Keep sends it to Claude', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  on('ui.toast', () => ({ value: undefined }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('prompt.compose', (_, e) => ({ sections: e.sections }))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine band</Text>
+  })
+  expect(keptSection([])).toBe(undefined)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const id = `${surface}-turn`
+    await $.turn.complete({ answer: `Okay.\n<!-- decision: no guards on ${surface} -->`, durationMs: 1000, isAborted: false, turnId: id, reason: 'answer' })
+    const band = await $.ui.mount({
+      plugin: 'atlas-hud',
+      component: 'AbovePrompt',
+      props: { hasSurvey: false, isWorking: false, maxRows: 8, bodyColumns: 100, scroll: { offset: 0, bodyRows: 8 }, view: {} },
+      surface,
+    })
+    expect((await band.find({ type: 'Text', text: /no guards/ }))?.text).toBe(`no guards on ${surface}`)
+    await band.press({ key: `band-keep-${NOW}-0` })
+    // Kept, the band hands back to the engine's own.
+    expect((await band.find({ type: 'Text', text: /engine band/ }))?.text).toBe('engine band')
+    await band.unmount()
+
+    const r = await $.prompt.compose({
+      model: 'claude-opus-5-5',
+      promptModel: 'claude-opus-5-5',
+      surfaces: [surface],
+      tools: [],
+      outputStyle: null,
+      traits: [],
+      sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' }],
+    } as never)
+    const kept = r.sections.find(s => s.id === 'atlas-hud-kept-decisions')
+    expect(kept?.text.includes(`- no guards on ${surface}`)).toBe(true)
+  }
 })
