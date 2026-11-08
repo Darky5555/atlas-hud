@@ -1,5 +1,7 @@
 // The transcript: tags on tool rows. Wraps the engine's rows, never rewrites
 // their text.
+import type { EngineInterface, SessionStartInput, ToolCallInput, ToolCallResult, TurnCompleteInput, TurnStartInput } from 'claude-code'
+
 import type { Step } from '../../types'
 import { classify } from '../lib'
 import { C } from '../ui/theme'
@@ -23,6 +25,21 @@ export const registerTranscript = (on: On) => {
       </Box>
     )
   })
+}
+
+// ---------- The shared events, called from register.tsx (see hub.ts) ----------
+
+export function transcriptSessionStart(_$: EngineInterface, _e: SessionStartInput) {}
+
+export function transcriptTurnStart(_$: EngineInterface, _e: TurnStartInput) {}
+
+export function transcriptToolStart(_$: EngineInterface, _e: ToolCallInput) {}
+
+export function transcriptToolEnd(_$: EngineInterface, _e: ToolCallInput, _ran: ToolCallResult) {}
+
+/** On the main loop, a string returned is shown beneath the answer. */
+export function transcriptTurnComplete(_$: EngineInterface, _e: TurnCompleteInput): string | undefined | Promise<string | undefined> {
+  return undefined
 }
 
 function badge(tool: string, input: unknown): { label: string; color: string } | undefined {

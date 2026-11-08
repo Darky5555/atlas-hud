@@ -1,7 +1,7 @@
 // The Atlas icon set. Features draw icons only through <Icon>, by name; how an
 // icon is drawn (SVG on desktop, glyphs or pictures in the terminal, motion)
 // is this file's business. Names are a fixed contract: add, never rename.
-import type { RenderSurface } from 'claude-code'
+import type { EngineInterface, RenderSurface, SessionStartInput, ToolCallInput, ToolCallResult, TurnCompleteInput, TurnStartInput } from 'claude-code'
 
 import type { Els } from './kit'
 import { C } from './theme'
@@ -106,3 +106,18 @@ const GLYPH: Record<IconName, string> = {
 }
 
 export const Icon = ({ el, name, color }: IconProps) => <el.Text color={color ?? C.teal}>{GLYPH[name]}</el.Text>
+
+// ---------- The shared events, called from register.tsx (see hub.ts) ----------
+
+export function iconsSessionStart(_$: EngineInterface, _e: SessionStartInput) {}
+
+export function iconsTurnStart(_$: EngineInterface, _e: TurnStartInput) {}
+
+export function iconsToolStart(_$: EngineInterface, _e: ToolCallInput) {}
+
+export function iconsToolEnd(_$: EngineInterface, _e: ToolCallInput, _ran: ToolCallResult) {}
+
+/** On the main loop, a string returned is shown beneath the answer. */
+export function iconsTurnComplete(_$: EngineInterface, _e: TurnCompleteInput): string | undefined | Promise<string | undefined> {
+  return undefined
+}

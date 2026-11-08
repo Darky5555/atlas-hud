@@ -21,7 +21,14 @@ import {
   timelineTurnStart,
   timelineView,
 } from './features/timeline'
-import { registerTranscript } from './features/transcript'
+import {
+  registerTranscript,
+  transcriptSessionStart,
+  transcriptToolEnd,
+  transcriptToolStart,
+  transcriptTurnComplete,
+  transcriptTurnStart,
+} from './features/transcript'
 import { registerUsage, usageSessionStart, usageToolEnd, usageToolStart, usageTurnComplete, usageTurnStart, usageView } from './features/usage'
 import {
   decisionBand,
@@ -35,6 +42,7 @@ import {
   workView,
 } from './features/work'
 import { guard } from './hub'
+import { iconsSessionStart, iconsToolEnd, iconsToolStart, iconsTurnComplete, iconsTurnStart } from './ui/icons'
 import type { TabSpec } from './ui/chrome'
 import { PaneFrame } from './ui/chrome'
 import type { Els } from './ui/kit'
@@ -63,6 +71,8 @@ export const register: Register = on => {
     await guard($, 'timeline.sessionStart', () => timelineSessionStart($, e))
     await guard($, 'agents.sessionStart', () => agentsSessionStart($, e))
     await guard($, 'git.sessionStart', () => gitSessionStart($, e))
+    await guard($, 'transcript.sessionStart', () => transcriptSessionStart($, e))
+    await guard($, 'icons.sessionStart', () => iconsSessionStart($, e))
     return next(e)
   })
 
@@ -72,6 +82,8 @@ export const register: Register = on => {
     await guard($, 'timeline.turnStart', () => timelineTurnStart($, e))
     await guard($, 'agents.turnStart', () => agentsTurnStart($, e))
     await guard($, 'git.turnStart', () => gitTurnStart($, e))
+    await guard($, 'transcript.turnStart', () => transcriptTurnStart($, e))
+    await guard($, 'icons.turnStart', () => iconsTurnStart($, e))
     return next(e)
   })
 
@@ -81,12 +93,16 @@ export const register: Register = on => {
     await guard($, 'timeline.toolStart', () => timelineToolStart($, e))
     await guard($, 'agents.toolStart', () => agentsToolStart($, e))
     await guard($, 'git.toolStart', () => gitToolStart($, e))
+    await guard($, 'transcript.toolStart', () => transcriptToolStart($, e))
+    await guard($, 'icons.toolStart', () => iconsToolStart($, e))
     const ran = await next(e)
     await guard($, 'usage.toolEnd', () => usageToolEnd($, e, ran))
     await guard($, 'work.toolEnd', () => workToolEnd($, e, ran))
     await guard($, 'timeline.toolEnd', () => timelineToolEnd($, e, ran))
     await guard($, 'agents.toolEnd', () => agentsToolEnd($, e, ran))
     await guard($, 'git.toolEnd', () => gitToolEnd($, e, ran))
+    await guard($, 'transcript.toolEnd', () => transcriptToolEnd($, e, ran))
+    await guard($, 'icons.toolEnd', () => iconsToolEnd($, e, ran))
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -97,6 +113,8 @@ export const register: Register = on => {
       await guard($, 'timeline.turnComplete', () => timelineTurnComplete($, e)),
       await guard($, 'agents.turnComplete', () => agentsTurnComplete($, e)),
       await guard($, 'git.turnComplete', () => gitTurnComplete($, e)),
+      await guard($, 'transcript.turnComplete', () => transcriptTurnComplete($, e)),
+      await guard($, 'icons.turnComplete', () => iconsTurnComplete($, e)),
     ].filter((t): t is string => typeof t === 'string' && t !== '')
     const r = await next(e)
     // A text other than the answer is drawn beneath it, on every surface.
