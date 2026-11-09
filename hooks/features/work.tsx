@@ -4,10 +4,12 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, RenderSurface, SessionStartInput, ToolCallInput, ToolCallResult, TurnCompleteInput, TurnStartInput } from 'claude-code'
 
 import type { Decision, Task } from '../../types'
-import { PLAN_TOOL, WRAP_TOOL, applyPlan, bar, decisionsIn, keptSection, wrapPlan } from '../lib'
+import { PLAN_TOOL, WRAP_TOOL, applyPlan, decisionsIn, keptSection, wrapPlan } from '../lib'
 import { C } from '../ui/theme'
 import type { Els, On } from '../ui/kit'
-import { Heading, str } from '../ui/kit'
+import { Bar, Card, Chip, Note, PROGRESS_RAMP, Pill, Section, str } from '../ui/kit'
+import type { IconName } from '../ui/icons'
+import { Icon } from '../ui/icons'
 
 export const tasks = atom({ plugin: 'atlas-hud', key: 'tasks' } as const, [] as Task[], { shape: 'tasks-1' })
 export const decisions = atom({ plugin: 'atlas-hud', key: 'decisions' } as const, [] as Decision[], { shape: 'decisions-1' })
@@ -131,87 +133,151 @@ export async function proposedCount($: EngineInterface) {
   return (await read($, decisions)).filter(d => d.status === 'proposed').length
 }
 
+// ---------- Views ----------
+
+/**
+ * An icon beside a Button: the icon sits outside the Button, since a Button
+ * takes only strings and Text (an Svg icon inside one is refused).
+ */
+const IconButton = ({
+  el,
+  surface,
+  icon,
+  color,
+  bkey,
+  label,
+  variant,
+  onPress,
+}: {
+  el: Els
+  surface: RenderSurface
+  icon: IconName
+  color: string
+  bkey: string
+  label: string
+  variant?: 'primary'
+  onPress: () => unknown
+}) => (
+  <el.Box flexDirection="row" gap={1} alignItems="center">
+    <Icon el={el} surface={surface} name={icon} color={color} />
+    <el.Button key={bkey} label={label} {...(variant ? { variant } : {})} onPress={() => void onPress()} />
+  </el.Box>
+)
+
 /** Claude's newest proposal, for the band above the prompt; undefined with none. */
-export async function decisionBand($: EngineInterface, el: Els, _surface: RenderSurface) {
+export async function decisionBand($: EngineInterface, el: Els, surface: RenderSurface) {
   const proposed = (await read($, decisions)).filter(d => d.status === 'proposed')
   const d = proposed.at(-1)
   if (!d) return undefined
   return (
-    <el.Box flexDirection="row" flexWrap="wrap" gap={1} borderStyle="round" borderColor={C.gold} paddingX={1}>
-      <el.Text mono size="caption" color={C.gold}>
-        DECISION
-      </el.Text>
+    <el.Box flexDirection="row" flexWrap="wrap" gap={1} alignItems="center" borderStyle="round" borderColor={C.gold} backgroundColor={C.panel} paddingX={1}>
+      <el.Box flexDirection="row" gap={1} alignItems="center">
+        <Icon el={el} surface={surface} name="decision" color={C.gold} />
+        <el.Text mono size="caption" weight="bold" color={C.gold}>
+          DECISION
+        </el.Text>
+      </el.Box>
       <el.Text color={C.text}>{d.text}</el.Text>
-      <el.Button key={`band-keep-${d.id}`} label="Keep" variant="primary" onPress={() => setDecision($, d.id, 'kept')} />
-      <el.Button key={`band-drop-${d.id}`} label="Drop" onPress={() => setDecision($, d.id, 'drop')} />
-      {proposed.length > 1 && <el.Text color={C.text2}>+{proposed.length - 1} more in /hud</el.Text>}
+      <IconButton el={el} surface={surface} icon="keep" color={C.ok} bkey={`band-keep-${d.id}`} label="Keep" variant="primary" onPress={() => setDecision($, d.id, 'kept')} />
+      <IconButton el={el} surface={surface} icon="drop" color={C.bad} bkey={`band-drop-${d.id}`} label="Drop" onPress={() => setDecision($, d.id, 'drop')} />
+      {proposed.length > 1 && <el.Text color={C.text2}>{`+${proposed.length - 1} more in /hud`}</el.Text>}
     </el.Box>
   )
 }
 
 /** The Work tab: tasks, then decisions. */
-export async function workView($: EngineInterface, el: Els, _surface: RenderSurface) {
+export async function workView($: EngineInterface, el: Els, surface: RenderSurface) {
   return (
     <el.Box flexDirection="column" gap={1}>
-      {await tasksView($, el)}
-      {decisionsView($, el, await read($, decisions))}
+      {await tasksView($, el, surface)}
+      {decisionsView($, el, surface, await read($, decisions))}
     </el.Box>
   )
 }
 
-async function tasksView($: EngineInterface, el: Els) {
+const TASK_ICON: Record<Task['status'], IconName> = { pending: 'task-pending', in_progress: 'task-active', completed: 'task-done' }
+
+async function tasksView($: EngineInterface, el: Els, surface: RenderSurface) {
   const list = await read($, tasks)
-  if (!list.length) return <el.Text color={C.text2}>No tasks yet. They appear here when Claude plans multi-step work.</el.Text>
+  if (!list.length) {
+    return (
+      <Section el={el} surface={surface} icon="work" title="Tasks">
+        <Note el={el} surface={surface} icon="task-pending">
+          No tasks yet. They appear here when Claude plans multi-step work.
+        </Note>
+      </Section>
+    )
+  }
   const done = list.filter(t => t.status === 'completed').length
+  const pct = (done / list.length) * 100
   const order = { in_progress: 0, pending: 1, completed: 2 } as const
   const sorted = [...list].sort((a, b) => order[a.status] - order[b.status])
   return (
-    <el.Box flexDirection="column" gap={0}>
-      <Heading el={el}>
-        {done} OF {list.length} DONE
-      </Heading>
-      <el.Text mono color={C.teal}>
-        {bar((done / list.length) * 100, 24)}
-      </el.Text>
-      {sorted.map(t => (
-        <el.Text
-          color={t.status === 'in_progress' ? C.teal : t.status === 'completed' ? C.text2 : C.text}
-          dimColor={t.status === 'completed'}
-          weight={t.status === 'in_progress' ? 'semibold' : 'regular'}
-        >
-          {t.status === 'completed' ? '✓ ' : t.status === 'in_progress' ? '▸ ' : '○ '}
-          {t.subject}
+    <Section el={el} surface={surface} icon="work" title={`${done} of ${list.length} done`}>
+      <el.Box flexDirection="row" gap={1} alignItems="center">
+        <Bar el={el} surface={surface} pct={pct} ramp={PROGRESS_RAMP} alt={`${done} of ${list.length} tasks done`} />
+        <el.Text mono tabular weight="bold" color={C.teal}>
+          {`${Math.round(pct)}%`}
         </el.Text>
+      </el.Box>
+      {sorted.map(t => (
+        <el.Box flexDirection="row" gap={1}>
+          <Icon
+            el={el}
+            surface={surface}
+            name={TASK_ICON[t.status]}
+            color={t.status === 'in_progress' ? C.teal : t.status === 'completed' ? C.ok : C.text3}
+            isLive={t.status === 'in_progress'}
+          />
+          <el.Text
+            color={t.status === 'in_progress' ? C.text : t.status === 'completed' ? C.text3 : C.text2}
+            weight={t.status === 'in_progress' ? 'semibold' : 'regular'}
+            strikethrough={t.status === 'completed'}
+          >
+            {t.subject}
+          </el.Text>
+        </el.Box>
       ))}
-    </el.Box>
+    </Section>
   )
 }
 
-function decisionsView($: EngineInterface, el: Els, list: Decision[]) {
+function decisionsView($: EngineInterface, el: Els, surface: RenderSurface, list: Decision[]) {
   const proposed = list.filter(d => d.status === 'proposed')
   const kept = list.filter(d => d.status === 'kept')
   return (
     <el.Box flexDirection="column" gap={1}>
-      {proposed.length > 0 && <Heading el={el}>CLAUDE PROPOSES</Heading>}
-      {proposed.map(d => (
-        <el.Box flexDirection="column" borderStyle="round" borderColor={C.gold} paddingX={1}>
-          <el.Text color={C.text}>{d.text}</el.Text>
-          <el.Box flexDirection="row" gap={1}>
-            <el.Button key={`keep-${d.id}`} label="Keep" variant="primary" onPress={() => setDecision($, d.id, 'kept')} />
-            <el.Button key={`drop-${d.id}`} label="Drop" onPress={() => setDecision($, d.id, 'drop')} />
+      {proposed.length > 0 && (
+        <Section el={el} surface={surface} icon="decision" title="Claude proposes" accent={C.gold} right={<Chip el={el} label={String(proposed.length)} />}>
+          <el.Box flexDirection="column" gap={1}>
+            {proposed.map(d => (
+              <Card el={el} accent={C.gold}>
+                <el.Text color={C.text}>{d.text}</el.Text>
+                <el.Box flexDirection="row" flexWrap="wrap" gap={1}>
+                  <IconButton el={el} surface={surface} icon="keep" color={C.ok} bkey={`keep-${d.id}`} label="Keep" variant="primary" onPress={() => setDecision($, d.id, 'kept')} />
+                  <IconButton el={el} surface={surface} icon="drop" color={C.bad} bkey={`drop-${d.id}`} label="Drop" onPress={() => setDecision($, d.id, 'drop')} />
+                </el.Box>
+              </Card>
+            ))}
           </el.Box>
-        </el.Box>
-      ))}
-      <Heading el={el}>KEPT</Heading>
-      {kept.length === 0 && <el.Text color={C.text2}>None yet. Kept decisions survive compaction.</el.Text>}
-      {kept.map(d => (
-        <el.Box flexDirection="row" justifyContent="space-between" gap={1}>
-          <el.Box flexShrink={1}>
-            <el.Text color={C.text}>· {d.text}</el.Text>
+        </Section>
+      )}
+      <Section el={el} surface={surface} icon="keep" title="Kept" right={kept.length ? <Pill el={el} label={String(kept.length)} /> : undefined}>
+        {kept.length === 0 && (
+          <Note el={el} surface={surface} icon="decision">
+            None yet. Kept decisions survive compaction.
+          </Note>
+        )}
+        {kept.map(d => (
+          <el.Box flexDirection="row" justifyContent="space-between" gap={1}>
+            <el.Box flexDirection="row" gap={1} flexShrink={1}>
+              <Icon el={el} surface={surface} name="check" color={C.teal} />
+              <el.Text color={C.text}>{d.text}</el.Text>
+            </el.Box>
+            <el.Button key={`rm-${d.id}`} label="Remove" plain dimColor onPress={() => void setDecision($, d.id, 'drop')} />
           </el.Box>
-          <el.Button key={`rm-${d.id}`} label="Remove" plain dimColor onPress={() => setDecision($, d.id, 'drop')} />
-        </el.Box>
-      ))}
+        ))}
+      </Section>
     </el.Box>
   )
 }

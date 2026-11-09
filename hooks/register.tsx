@@ -158,7 +158,7 @@ export const register: Register = on => {
       const git = await gitPanel($, el, e.surface)
       body = (
         <el.Box flexDirection="column" gap={1}>
-          {await usageView($, el, now)}
+          {await usageView($, el, now, e.surface)}
           {git}
         </el.Box>
       )

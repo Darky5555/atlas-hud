@@ -1,12 +1,12 @@
 // Usage: limits, context and cost, pushed by the engine and never polled.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, SessionStartInput, ToolCallInput, ToolCallResult, TurnCompleteInput, TurnStartInput } from 'claude-code'
+import type { EngineInterface, RenderSurface, SessionStartInput, ToolCallInput, ToolCallResult, TurnCompleteInput, TurnStartInput } from 'claude-code'
 
 import type { Usage } from '../../types'
 import { duration, limitLabel, projectFull, resetsIn, statusText } from '../lib'
 import { C } from '../ui/theme'
 import type { Els, On } from '../ui/kit'
-import { Gauge, Heading } from '../ui/kit'
+import { Gauge, Note, Section, Stat } from '../ui/kit'
 
 const EMPTY_USAGE: Usage = { contextWindow: 0, limits: [], samples: [], alerted: {} }
 
@@ -84,40 +84,62 @@ export function usageTurnComplete(_$: EngineInterface, _e: TurnCompleteInput): s
   return undefined
 }
 
-export async function usageView($: EngineInterface, el: Els, now: number) {
+/**
+ * The usage half of Overview: each limit as a gauge with its reset and pace
+ * notes, the context window, and the session's cost.
+ */
+export async function usageView($: EngineInterface, el: Els, now: number, surface?: RenderSurface) {
   const u = await read($, usage)
   if (!u.limits.length && u.contextPercent === undefined) {
-    return <el.Text color={C.text2}>Waiting for the first usage reading. It arrives after Claude's next reply.</el.Text>
+    return (
+      <Note el={el} surface={surface} icon="clock">
+        Waiting for the first usage reading. It arrives after Claude's next reply.
+      </Note>
+    )
   }
   return (
     <el.Box flexDirection="column" gap={1}>
-      <Heading el={el}>LIMITS</Heading>
-      {u.limits.map(l => {
-        const reset = resetsIn(l, now)
-        const full = projectFull(u, l.kind, now)
-        const resetMs = l.resetsAt ? Date.parse(l.resetsAt) - now : Infinity
-        const pace =
-          full === undefined ? '' : full < resetMs ? ` At this pace you hit 100% in ~${duration(full)}, before it resets.` : ' At this pace you stay under it.'
-        return <Gauge el={el} label={limitLabel(l.kind)} pct={l.percentUsed} note={`${reset ? `Resets in ${reset}.` : ''}${pace}`} />
-      })}
+      {u.limits.length > 0 && (
+        <Section el={el} surface={surface} icon="limit" title="Limits">
+          <el.Box flexDirection="column" gap={1}>
+            {u.limits.map(l => {
+              const reset = resetsIn(l, now)
+              const full = projectFull(u, l.kind, now)
+              const resetMs = l.resetsAt ? Date.parse(l.resetsAt) - now : Infinity
+              const isAhead = full !== undefined && full < resetMs
+              return (
+                <Gauge el={el} surface={surface} label={limitLabel(l.kind)} pct={l.percentUsed}>
+                  {reset && (
+                    <Note el={el} surface={surface} icon="clock">
+                      {`Resets in ${reset}.`}
+                    </Note>
+                  )}
+                  {full !== undefined && (
+                    <Note el={el} surface={surface} icon={isAhead ? 'warning' : 'check'} color={isAhead ? C.warn : C.text2}>
+                      {isAhead ? `At this pace you hit 100% in ~${duration(full)}, before it resets.` : 'At this pace you stay under it.'}
+                    </Note>
+                  )}
+                </Gauge>
+              )
+            })}
+          </el.Box>
+        </Section>
+      )}
       {u.contextPercent !== undefined && (
-        <el.Box flexDirection="column" gap={1}>
-          <Heading el={el}>THIS CONVERSATION</Heading>
+        <Section el={el} surface={surface} icon="context" title="This conversation">
           <Gauge
             el={el}
+            surface={surface}
             label="Context window"
             pct={u.contextPercent}
             note={`${(u.contextTokens ?? 0).toLocaleString('en-US')} of ${u.contextWindow.toLocaleString('en-US')} tokens. When it fills, Claude compacts; open tasks and kept decisions are carried through.`}
           />
-        </el.Box>
+        </Section>
       )}
       {u.costUsd !== undefined && (
-        <el.Box flexDirection="row" justifyContent="space-between">
-          <el.Text color={C.text2}>Session cost (API rates)</el.Text>
-          <el.Text mono tabular color={C.gold}>
-            ${u.costUsd.toFixed(2)}
-          </el.Text>
-        </el.Box>
+        <Section el={el} surface={surface} icon="cost" title="Cost" accent={C.gold}>
+          <Stat el={el} surface={surface} label="Session cost" value={`$${u.costUsd.toFixed(2)}`} color={C.gold} sub="At API rates." />
+        </Section>
       )}
     </el.Box>
   )
