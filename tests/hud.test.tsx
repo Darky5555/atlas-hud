@@ -161,7 +161,7 @@ test('an edit with no check gets a card that says so, and tool rows get tags', a
   const done = await $.turn.complete({ answer: 'Fixed, all done.', durationMs: 4000, isAborted: false, turnId: 'k', reason: 'answer' })
   // The summary is the text shown beneath the answer.
   expect(done.text).toBe(
-    'WHAT CHANGED · 0m\nChanged 1 file: theme.css.\n! Says done, but nothing was run to check the change.',
+    'WHAT CHANGED · 4s\nChanged 1 file: theme.css.\n! Says done, but nothing was run to check the change.',
   )
 
   // A turn that used no tools leaves the answer alone.

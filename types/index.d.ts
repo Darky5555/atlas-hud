@@ -44,6 +44,13 @@ export type Turn = {
   isVerified: boolean
   claimsDone: boolean
   lines: string[]
+  // ---- Timeline v2: optional, since turns stored before v2 lack them ----
+  /** What the turn cost, from `turn.complete`'s `usage`; absent when it reported none. */
+  tokens?: TurnTokens
+  /** Tool calls by tool name. */
+  tools?: Record<string, number>
+  /** Successful Edit / Write / NotebookEdit calls by file path. */
+  fileEdits?: Record<string, number>
 }
 
 export type Tab = 'overview' | 'work' | 'agents' | 'timeline'
@@ -115,6 +122,9 @@ export type GitInfo = {
 
 
 // ---- Timeline feature types (timeline.tsx) ----
+
+/** A turn's token counts, summed over its requests (TurnUsage). */
+export type TurnTokens = { input: number; output: number; cacheRead: number; cacheWrite: number }
 
 
 

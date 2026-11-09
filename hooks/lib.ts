@@ -34,6 +34,19 @@ export const duration = (ms: number) => {
   return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
+/**
+ * A turn's length to the second: "<1s", "42s", "3m 05s", "1h 02m". `duration`
+ * stays the coarse one (reset notes); it reads "0m" for a short turn.
+ */
+export const turnDuration = (ms: number) => {
+  if (!Number.isFinite(ms) || ms < 1000) return '<1s'
+  const total = Math.round(ms / 1000)
+  if (total < 60) return `${total}s`
+  const m = Math.floor(total / 60)
+  if (m < 60) return `${m}m ${String(total % 60).padStart(2, '0')}s`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
 export const resetsIn = (limit: Limit, now: number) =>
   limit.resetsAt ? duration(Date.parse(limit.resetsAt) - now) : undefined
 
@@ -147,7 +160,7 @@ export const verdict = (t: Pick<Turn, 'edited' | 'created' | 'isVerified' | 'cla
 export const summaryText = (t: Turn) => {
   const v = verdict(t)
   const mark = v ? `${v.tone === 'ok' ? '✓' : v.tone === 'warn' ? '!' : '·'} ${v.text}` : undefined
-  return [`WHAT CHANGED · ${duration(t.durationMs)}`, ...t.lines, ...(mark ? [mark] : [])].join('\n')
+  return [`WHAT CHANGED · ${turnDuration(t.durationMs)}`, ...t.lines, ...(mark ? [mark] : [])].join('\n')
 }
 
 export const DECISION =/<!--\s*decision:\s*([\s\S]+?)\s*-->/gi
