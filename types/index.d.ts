@@ -102,8 +102,11 @@ export type AgentRun = {
 export type GitCommit = { sha: string; subject: string }
 
 export type GitInfo = {
-  /** unknown: not read yet; none: not a repository, or git is missing. */
-  status: 'unknown' | 'none' | 'repo'
+  /**
+   * unknown: not read yet; none: not a repository; unavailable: git did not
+   * answer (too slow, missing or refused) and nothing was read before.
+   */
+  status: 'unknown' | 'none' | 'unavailable' | 'repo'
   branch?: string
   isDetached?: boolean
   headSha?: string
@@ -115,8 +118,12 @@ export type GitInfo = {
   /** The newest unpushed commits, at most 5. */
   unpushed: GitCommit[]
   unpushedCount: number
+  /** The count could not be read (too slow): `unpushedCount` is a lower bound. */
+  isCountAtLeast?: boolean
   uncommitted: number
   lastCommit?: string
+  /** The latest read got no answer from git: this is what was read before. */
+  isOutdated?: boolean
   at: number
 }
 

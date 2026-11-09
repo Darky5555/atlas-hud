@@ -4,6 +4,9 @@ import type { On } from 'claude-code'
 import { parseLog, parseStatus, touchesGit } from '../hooks/features/git'
 
 const NOW = Date.parse('2026-11-05T12:00:00Z')
+const GIT_TIMEOUT_MS = 3000
+/** How long after a tool call or a turn end the git read runs. */
+const SOON = 300
 
 const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
 // The band above the prompt is raised on these two only.
@@ -36,6 +39,8 @@ type Repo = {
   isRepo?: boolean
   /** git cannot run at all: the call rejects. */
   isMissing?: boolean
+  /** These subcommands (`status`, `rev-list`, ...) run past the timeout: the call rejects 3s later. */
+  timesOut?: string[]
   branch?: string
   upstream?: string
   /** The upstream is set but was deleted on the remote: no `# branch.ab`, and `@{upstream}` fails. */
@@ -76,27 +81,47 @@ const answer = (repo: Repo, argv: readonly string[]) => {
   return fail(`unexpected: git ${argv.slice(1).join(' ')}`)
 }
 
+type World = {
+  repo: Repo
+  calls: string[]
+  /** How long each git command takes to answer, on the mocked clock. */
+  delayMs?: number
+}
+
 /**
  * Stands for the engine beneath the plugin: the session, the pane, the clock,
  * and git through `$.process.run`, answered from `world.repo`.
  */
-const engine = (on: On, world: { repo: Repo; calls: string[] }) => {
+const engine = (on: On, world: World) => {
   const clock = mock.clock(on, { now: NOW })
   on('command.register', () => ({ value: { command: 'hud' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work/repo' }))
-  on('process.run', (_, e) => {
+  on('process.run', async (_, e) => {
     world.calls.push(e.argv.join(' '))
     if (world.repo.isMissing) throw new Error('spawn git ENOENT')
+    if (world.repo.timesOut?.includes(e.argv[1] ?? '')) {
+      await clock.sleep(GIT_TIMEOUT_MS)
+      throw new Error('git timed out')
+    }
+    if (world.delayMs) await clock.sleep(world.delayMs)
     return { value: answer(world.repo, e.argv) }
   })
   return clock
 }
 
-const start = ($: { session: { start: (e: { cwd: string; surface: 'desktop'; isInteractive: boolean }) => Promise<unknown> } }) =>
-  $.session.start({ cwd: '/work/repo', surface: 'desktop', isInteractive: true })
+/** Starts the session and lets the git read it scheduled run. */
+const start = async (
+  $: { session: { start: (e: { cwd: string; surface: 'desktop'; isInteractive: boolean }) => Promise<unknown> } },
+  clock: { settle: () => Promise<void> },
+) => {
+  await $.session.start({ cwd: '/work/repo', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+}
+
+const statusCalls = (world: World) => world.calls.filter(c => c.startsWith('git status')).length
 
 const texts = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) => (await ui.findAll({ type: 'Text' })).map(t => t.text)
 
@@ -172,8 +197,8 @@ test('the panel shows the branch, unpushed commits and uncommitted changes on ev
       changes: ['hooks/a.ts', 'hooks/b.ts', '?notes.txt'],
     } as Repo,
   }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
 
   expect(world.calls[0]).toBe('git status --porcelain=v2 --branch')
   expect(world.calls).toContain('git log --format=%h%x09%s -n 5 @{upstream}..HEAD')
@@ -199,8 +224,8 @@ test('the panel shows the branch, unpushed commits and uncommitted changes on ev
 test('a branch with no upstream says so and counts what is not pushed anywhere', async ($, on) => {
   const commits = Array.from({ length: 7 }, (_, i) => ({ sha: `c0ffee${i}`, subject: `Commit ${7 - i}` }))
   const world = { calls: [] as string[], repo: { branch: 'local-only', commits, unpushed: 7 } as Repo }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
 
   expect(world.calls).toContain('git rev-list --count HEAD --not --remotes')
   for (const surface of SURFACES) {
@@ -218,6 +243,38 @@ test('a branch with no upstream says so and counts what is not pushed anywhere',
   }
 })
 
+test('a count that times out on a long local-only history reads as at least the listed five', async ($, on) => {
+  const commits = Array.from({ length: 7 }, (_, i) => ({ sha: `c0ffee${i}`, subject: `Commit ${7 - i}` }))
+  const world: World = { calls: [], repo: { branch: 'local-only', commits, unpushed: 7, timesOut: ['rev-list'] } }
+  const clock = engine(on, world)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await start($, clock)
+  await clock.advance(GIT_TIMEOUT_MS)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const t = await texts(ui)
+    expect(t).toContain('5+ unpushed')
+    expect(t.includes('5 unpushed')).toBe(false)
+    expect(t).toContain('c0ffee4')
+    expect(t.some(x => /and \d+ more/.test(x))).toBe(false)
+    await ui.unmount()
+  }
+
+  // Once slow, the count is not asked again this session.
+  const revLists = () => world.calls.filter(c => c.startsWith('git rev-list')).length
+  expect(revLists()).toBe(1)
+  await $.turn.start({ text: 'go', turnId: 'c1' })
+  await $.turn.complete({ answer: 'Done.', durationMs: 1000, isAborted: false, turnId: 'c1', reason: 'answer' })
+  await clock.advance(SOON)
+  expect(statusCalls(world)).toBe(2)
+  expect(revLists()).toBe(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await texts(ui)).toContain('5+ unpushed')
+  await ui.unmount()
+})
+
 test('a branch whose upstream is gone says so and counts what is on no remote', async ($, on) => {
   const commits = [
     { sha: 'abc1234', subject: 'Local one' },
@@ -225,8 +282,8 @@ test('a branch whose upstream is gone says so and counts what is on no remote', 
     { sha: '0123456', subject: 'Pushed long ago' },
   ]
   const world = { calls: [] as string[], repo: { branch: 'master', upstream: 'origin/main', isUpstreamGone: true, commits, unpushed: 2 } as Repo }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
 
   expect(world.calls).toContain('git rev-list --count HEAD --not --remotes')
   expect(world.calls.some(c => c.includes('@{upstream}'))).toBe(false)
@@ -247,8 +304,8 @@ test('a gone upstream with nothing local reads gone, not in sync', async ($, on)
     calls: [] as string[],
     repo: { branch: 'master', upstream: 'origin/main', isUpstreamGone: true, commits: [{ sha: 'abc1234', subject: 'x' }], unpushed: 0 } as Repo,
   }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'vscode' })
   const t = await texts(ui)
   expect(t).toContain('Upstream origin/main is gone')
@@ -258,8 +315,8 @@ test('a gone upstream with nothing local reads gone, not in sync', async ($, on)
 
 test('a branch with no upstream and nothing unpushed says only that no upstream is set', async ($, on) => {
   const world = { calls: [] as string[], repo: { branch: 'scratch', commits: [{ sha: 'abc1234', subject: 'x' }], unpushed: 0 } as Repo }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'mobile' })
   const t = await texts(ui)
   expect(t).toContain('No upstream set')
@@ -272,8 +329,8 @@ test('a branch level with its upstream reads in sync and clean', async ($, on) =
     calls: [] as string[],
     repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'abc1234', subject: 'Ship it' }], unpushed: 0 } as Repo,
   }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -291,8 +348,8 @@ test('behind its upstream, the panel says how far', async ($, on) => {
     calls: [] as string[],
     repo: { branch: 'main', upstream: 'origin/main', behind: 3, commits: [{ sha: 'abc1234', subject: 'Ship it' }], unpushed: 0 } as Repo,
   }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const t = await texts(ui)
   expect(t).toContain('↓3 behind')
@@ -302,8 +359,8 @@ test('behind its upstream, the panel says how far', async ($, on) => {
 
 test('a detached HEAD is named by its commit', async ($, on) => {
   const world = { calls: [] as string[], repo: { branch: '(detached)', commits: [{ sha: 'abc1234', subject: 'Bisect here' }], unpushed: 0 } as Repo }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const t = await texts(ui)
   expect(t).toContain('detached at abc1234')
@@ -315,8 +372,8 @@ test('a detached HEAD is named by its commit', async ($, on) => {
 
 test('outside a repository the panel says so on every surface', async ($, on) => {
   const world = { calls: [] as string[], repo: { isRepo: false } as Repo }
-  engine(on, world)
-  await start($)
+  const clock = engine(on, world)
+  await start($, clock)
 
   // Not a repository: one status call, nothing more asked.
   expect(world.calls).toEqual(['git status --porcelain=v2 --branch'])
@@ -340,24 +397,25 @@ test('before git is read the Overview draws no git block', async ($, on) => {
 
 // ---------- Refreshing ----------
 
-test('an edit or a git command refreshes the panel, at most once in two seconds', async ($, on) => {
-  const world = {
-    calls: [] as string[],
-    repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'aaa1111', subject: 'One' }], unpushed: 0 } as Repo,
+test('an edit or a git command refreshes the panel a moment later, at most once in two seconds', async ($, on) => {
+  const world: World = {
+    calls: [],
+    repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'aaa1111', subject: 'One' }], unpushed: 0 },
   }
   const clock = engine(on, world)
   on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
-  await start($)
-  const statusCalls = () => world.calls.filter(c => c.startsWith('git status')).length
-  expect(statusCalls()).toBe(1)
+  await start($, clock)
+  expect(statusCalls(world)).toBe(1)
 
-  // A commit lands; a git command refreshes once the gap has passed.
+  // A commit lands; the git command asks for a read, which runs a moment later.
   await clock.advance(3000)
   world.repo = { ...world.repo, ahead: 1, commits: [{ sha: 'bbb2222', subject: 'Two' }, ...(world.repo.commits ?? [])], unpushed: 1 }
   await $.tool.call({ tool: 'Bash', command: 'git commit -m Two' })
-  expect(statusCalls()).toBe(2)
+  expect(statusCalls(world)).toBe(1)
+  await clock.advance(SOON)
+  expect(statusCalls(world)).toBe(2)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await texts(ui)).toContain('1 unpushed')
   await ui.unmount()
@@ -365,32 +423,39 @@ test('an edit or a git command refreshes the panel, at most once in two seconds'
   // A command that is not git asks nothing.
   await clock.advance(3000)
   await $.tool.call({ tool: 'Bash', command: 'ls' })
-  expect(statusCalls()).toBe(2)
+  await clock.advance(3000)
+  expect(statusCalls(world)).toBe(2)
 
-  // Within the gap an edit is skipped, and the end of the turn catches up.
+  // Within the gap an edit's read waits; the end of the turn reads at once,
+  // and that one read covers the edit's.
   await $.turn.start({ text: 'edit', turnId: 'r1' })
   await $.tool.call({ tool: 'Bash', command: 'git push' })
-  expect(statusCalls()).toBe(3)
+  await clock.advance(SOON)
+  expect(statusCalls(world)).toBe(3)
   world.repo = { ...world.repo, changes: ['a.ts'] }
   await $.tool.call({ tool: 'Edit', file_path: '/work/repo/a.ts', old_string: 'a', new_string: 'b' })
-  expect(statusCalls()).toBe(3)
+  await clock.advance(SOON)
+  expect(statusCalls(world)).toBe(3)
   await $.turn.complete({ answer: 'Edited.', durationMs: 1000, isAborted: false, turnId: 'r1', reason: 'answer' })
-  expect(statusCalls()).toBe(4)
+  await clock.advance(SOON)
+  expect(statusCalls(world)).toBe(4)
   const after = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await texts(after)).toContain('1 uncommitted')
   await after.unmount()
+  await clock.advance(10_000)
+  expect(statusCalls(world)).toBe(4)
 })
 
 test('the end of a turn reads git again after a command that is not git changed files', async ($, on) => {
-  const world = {
-    calls: [] as string[],
-    repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'aaa1111', subject: 'One' }], unpushed: 0, changes: ['a.ts'] } as Repo,
+  const world: World = {
+    calls: [],
+    repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'aaa1111', subject: 'One' }], unpushed: 0, changes: ['a.ts'] },
   }
   const clock = engine(on, world)
   on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
-  await start($)
+  await start($, clock)
   const before = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await texts(before)).toContain('1 uncommitted')
   await before.unmount()
@@ -400,7 +465,8 @@ test('the end of a turn reads git again after a command that is not git changed 
   world.repo = { ...world.repo, changes: [] }
   await $.tool.call({ tool: 'Bash', command: 'rm a.ts' })
   await $.turn.complete({ answer: 'Removed it.', durationMs: 1000, isAborted: false, turnId: 'rm1', reason: 'answer' })
-  expect(world.calls.filter(c => c.startsWith('git status')).length).toBe(2)
+  await clock.advance(SOON)
+  expect(statusCalls(world)).toBe(2)
   const after = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const t = await texts(after)
   expect(t).toContain('clean')
@@ -408,19 +474,105 @@ test('the end of a turn reads git again after a command that is not git changed 
   await after.unmount()
 })
 
-test('a failing git never reaches the tool call or the turn', async ($, on) => {
-  const world = { calls: [] as string[], repo: { isMissing: true } as Repo }
+test('a slow git holds neither the tool result nor the turn, and what changed during a read is read after it', async ($, on) => {
+  const world: World = {
+    calls: [],
+    repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'aaa1111', subject: 'One' }], unpushed: 0 },
+  }
+  const clock = engine(on, world)
+  on('tool.call', () => ({ result: { type: 'update', filePath: '/work/repo/a.ts' } }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await start($, clock)
+  await clock.advance(3000)
+
+  // Each git command now takes a second and a half to answer.
+  world.delayMs = 1500
+  await $.turn.start({ text: 'edit', turnId: 's1' })
+  await $.tool.call({ tool: 'Edit', file_path: '/work/repo/a.ts', old_string: 'a', new_string: 'b' })
+  await clock.advance(SOON)
+  // The read is under way, waiting on git.
+  expect(statusCalls(world)).toBe(2)
+
+  // A tool call and the turn's end come back at once, git still busy.
+  world.repo = { ...world.repo, changes: ['a.ts'] }
+  const at = clock.now()
+  const ran = await $.tool.call({ tool: 'Edit', file_path: '/work/repo/a.ts', old_string: 'b', new_string: 'c' })
+  expect((ran as { result?: unknown }).result).toEqual({ type: 'update', filePath: '/work/repo/a.ts' })
+  const done = await $.turn.complete({ answer: 'Changed it.', durationMs: 1000, isAborted: false, turnId: 's1', reason: 'answer' })
+  expect(done.text?.startsWith('WHAT CHANGED')).toBe(true)
+  expect(clock.now()).toBe(at)
+  expect(statusCalls(world)).toBe(2)
+
+  // The read in flight finishes (status, then the logs: 3s) and one more follows it.
+  await clock.advance(3000 + SOON)
+  expect(statusCalls(world)).toBe(3)
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await texts(ui)).toContain('1 uncommitted')
+  await ui.unmount()
+  await clock.advance(10_000)
+  expect(statusCalls(world)).toBe(3)
+})
+
+test('a git status that times out says git did not answer, not that there is no repository', async ($, on) => {
+  const world: World = { calls: [], repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'abc1234', subject: 'x' }], timesOut: ['status'] } }
+  const clock = engine(on, world)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await start($, clock)
+  await clock.advance(GIT_TIMEOUT_MS)
+  expect(statusCalls(world)).toBe(1)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const t = await texts(ui)
+    expect(t).toContain('GIT')
+    expect(t).toContain('Git did not answer (too slow, or not installed). Trying again later.')
+    expect(t.includes('No git repository here.')).toBe(false)
+    await ui.unmount()
+  }
+
+  // Git answers again: read once the backoff is over, and the note goes.
+  world.repo = { ...world.repo, timesOut: [] }
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.turn.complete({ answer: 'Done.', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(10_000)
+  expect(statusCalls(world)).toBe(2)
+  const back = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  let t = await texts(back)
+  expect(t).toContain('in sync')
+  expect(t.some(x => /did not answer/.test(x))).toBe(false)
+  await back.unmount()
+
+  // A read that times out after a good one keeps the repository, marked out of date.
+  world.repo = { ...world.repo, timesOut: ['status'] }
+  await $.turn.start({ text: 'go', turnId: 't2' })
+  await $.turn.complete({ answer: 'Done.', durationMs: 1000, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(SOON + GIT_TIMEOUT_MS)
+  expect(statusCalls(world)).toBe(3)
+  const stale = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  t = await texts(stale)
+  expect(t).toContain('main')
+  expect(t).toContain('Git did not answer the latest read: this may be out of date.')
+  await stale.unmount()
+})
+
+test('a failing git never reaches the tool call or the turn, and is retried on a growing interval', async ($, on) => {
+  const world: World = { calls: [], repo: { isMissing: true } }
   const clock = engine(on, world)
   on('tool.call', () => ({ result: { type: 'update', filePath: '/work/repo/a.ts' } }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
 
-  await start($)
+  await start($, clock)
   expect(world.calls.length).toBe(1)
 
-  // git missing: the panel says no repository rather than nothing.
+  // git missing: the panel says git did not answer, not that there is no repository.
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await texts(ui)).toContain('No git repository here.')
+  const t = await texts(ui)
+  expect(t).toContain('Git did not answer (too slow, or not installed). Trying again later.')
+  expect(t.includes('No git repository here.')).toBe(false)
   await ui.unmount()
 
   await clock.advance(3000)
@@ -428,35 +580,42 @@ test('a failing git never reaches the tool call or the turn', async ($, on) => {
   const ran = await $.tool.call({ tool: 'Edit', file_path: '/work/repo/a.ts', old_string: 'a', new_string: 'b' })
   expect(ran.isError === true).toBe(false)
   expect((ran as { result?: unknown }).result).toEqual({ type: 'update', filePath: '/work/repo/a.ts' })
-  // After a failure tool calls stop waiting on git.
-  expect(world.calls.length).toBe(1)
 
   const done = await $.turn.complete({ answer: 'Changed it.', durationMs: 1000, isAborted: false, turnId: 'f1', reason: 'answer' })
   // The turn ends as it would without git: the timeline's summary beneath the answer.
   expect(done.text?.startsWith('WHAT CHANGED')).toBe(true)
   expect(done.text?.includes('Changed 1 file: a.ts.')).toBe(true)
-  // The end of the turn tried again, and failed quietly.
+  // Backed off: nothing is asked of git until 10s after the failure.
+  await clock.advance(SOON)
+  expect(world.calls.length).toBe(1)
+  await clock.advance(7000)
+  // Then once for the edit and the turn's end together, failing quietly.
   expect(world.calls.length).toBe(2)
 
-  // A git that works again is read at the end of the next turn.
+  // A git that works again is read once the next, longer, wait is over (20s).
   world.repo = { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'abc1234', subject: 'Back' }], unpushed: 0 }
   await $.turn.start({ text: 'again', turnId: 'f2' })
   await $.tool.call({ tool: 'Edit', file_path: '/work/repo/a.ts', old_string: 'b', new_string: 'c' })
   await $.turn.complete({ answer: 'Again.', durationMs: 1000, isAborted: false, turnId: 'f2', reason: 'answer' })
+  await clock.advance(10_000)
+  expect(world.calls.length).toBe(2)
+  await clock.advance(10_000)
+  expect(statusCalls(world)).toBe(3)
   const back = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await texts(back)).toContain('in sync')
   await back.unmount()
 })
 
 test('a git that exits non-zero on a later read keeps the tool call whole', async ($, on) => {
-  const world = { calls: [] as string[], repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'abc1234', subject: 'x' }] } as Repo }
+  const world: World = { calls: [], repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'abc1234', subject: 'x' }] } }
   const clock = engine(on, world)
   on('tool.call', () => ({ result: { stdout: 'ok', stderr: '' } }))
-  await start($)
+  await start($, clock)
   await clock.advance(3000)
   world.repo = { isRepo: false }
   const ran = await $.tool.call({ tool: 'Bash', command: 'git status' })
   expect((ran as { result?: { stdout?: string } }).result?.stdout).toBe('ok')
+  await clock.advance(SOON)
   const ui = await $.ui.mount({ ...PANE, surface: 'mobile' })
   expect(await texts(ui)).toContain('No git repository here.')
   await ui.unmount()

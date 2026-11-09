@@ -1,7 +1,7 @@
 // Git and the done-check: the branch, what is not pushed or not committed yet,
 // and a warning above the prompt when Claude says done without checking.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, RenderSurface, SessionStartInput, ToolCallInput, ToolCallResult, TurnCompleteInput, TurnStartInput } from 'claude-code'
+import type { EngineInterface, RenderSurface, SessionStartInput, Timer, ToolCallInput, ToolCallResult, TurnCompleteInput, TurnStartInput } from 'claude-code'
 
 import type { GitCommit, GitInfo, Turn } from '../../types'
 import { verdict } from '../lib'
@@ -13,7 +13,7 @@ import { C } from '../ui/theme'
 
 const EMPTY_GIT: GitInfo = { status: 'unknown', ahead: 0, behind: 0, unpushed: [], unpushedCount: 0, uncommitted: 0, at: 0 }
 
-export const git = atom({ plugin: 'atlas-hud', key: 'git' } as const, EMPTY_GIT, { shape: 'git-1' })
+export const git = atom({ plugin: 'atlas-hud', key: 'git' } as const, EMPTY_GIT, { shape: 'git-2' })
 // The timeline feature's turns, declared here too: read() takes only an atom the
 // engine's scan can resolve in this file.
 const turns = atom({ plugin: 'atlas-hud', key: 'turns' } as const, [] as Turn[], { shape: 'turns-1' })
@@ -104,7 +104,8 @@ async function nowMs($: EngineInterface) {
 
 /**
  * Reads the repository in the session's directory; `status: 'none'` outside
- * one. `undefined` when git itself could not run (the caller keeps what it had).
+ * one. `undefined` when git itself could not run (missing, refused, or too
+ * slow): the caller keeps that apart from "not a repository".
  */
 export async function collectGit($: EngineInterface): Promise<GitInfo | undefined> {
   // The session's directory, not `session.repo().root`: in a worktree that is
@@ -121,18 +122,25 @@ export async function collectGit($: EngineInterface): Promise<GitInfo | undefine
   // A gone upstream can't be compared against: count what is on no remote.
   const isTracking = s.upstream !== undefined && !s.isUpstreamGone
   const range = isTracking ? ['@{upstream}..HEAD'] : ['HEAD', '--not', '--remotes']
+  // Counting a long local-only history can outrun the timeout; once it has, it
+  // is not asked again this session and the count is shown as a lower bound.
+  const isCounting = !isTracking && !skipRevList
 
   const [last, unpushed, count] = hasCommits
     ? await Promise.all([
         runGit($, ['log', '-1', '--format=%h%x09%s'], cwd),
         runGit($, ['log', '--format=%h%x09%s', '-n', String(MAX_UNPUSHED), ...range], cwd),
-        isTracking ? Promise.resolve(undefined) : runGit($, ['rev-list', '--count', ...range], cwd),
+        isCounting ? runGit($, ['rev-list', '--count', ...range], cwd) : Promise.resolve(undefined),
       ])
     : [undefined, undefined, undefined]
+  if (count === null) skipRevList = true
 
   const lastCommit = typeof last === 'string' ? parseLog(last)[0] : undefined
   const list = typeof unpushed === 'string' ? parseLog(unpushed) : []
   const counted = typeof count === 'string' && /^\s*\d+\s*$/.test(count) ? Number(count.trim()) : NaN
+  // Without a count, a full page of commits may be only the first of more;
+  // fewer than a page is the whole list.
+  const isCountKnown = isTracking || Number.isFinite(counted) || (typeof unpushed === 'string' && list.length < MAX_UNPUSHED)
   return {
     status: 'repo',
     branch: isDetached ? undefined : s.head,
@@ -144,55 +152,121 @@ export async function collectGit($: EngineInterface): Promise<GitInfo | undefine
     behind: s.behind,
     unpushed: list.slice(0, MAX_UNPUSHED),
     unpushedCount: isTracking ? s.ahead : Number.isFinite(counted) ? counted : list.length,
+    ...(hasCommits && !isCountKnown ? { isCountAtLeast: true } : {}),
     uncommitted: s.changes,
     lastCommit: lastCommit?.subject || undefined,
     at,
   }
 }
 
-// At most one refresh in flight, and none within 2s of the last after a tool
-// call; every main-loop turn ends with a forced one, which catches up what was
-// skipped and what changed without a git command or an edit (rm, a formatter,
-// git outside Claude). Once git
-// could not run at all (missing, or too slow), tool calls stop waiting on it
-// until a refresh at the end of a turn or a session start works again.
-let inFlight: Promise<void> | undefined
-let lastAt = Number.NEGATIVE_INFINITY
+// ---------- Refreshing, off the hook's path ----------
+//
+// No hook waits on git: a tool call or a turn end asks for a refresh, and one
+// `$.clock.after` timer runs it a moment later, so a burst of edits is read
+// once and a slow git never holds a tool result or a turn. At most one read
+// runs at a time, and a tool call's read waits out a 2s gap after the last; a
+// request that comes while one runs is read once more after it settles (the
+// end of a turn's read catches what changed without a git command or an edit:
+// rm, a formatter, git outside Claude). When git does not answer at all (too
+// slow, or missing), the panel says so and reads are put off on a growing
+// interval (10s, 20s, 40s ... 5 min) until one works again. The panel redraws
+// when the atom is written.
+
+const DEBOUNCE_MS = 300
+const RETRY_BASE_MS = 10_000
+const RETRY_MAX_MS = 5 * 60_000
+
+let timer: Timer | undefined
+let timerDue = Number.POSITIVE_INFINITY
+let isRunning = false
+/** A request came while a read was running: read once more after it. */
 let stale = false
-let isBackedOff = false
+let isStaleForced = false
+let lastAt = Number.NEGATIVE_INFINITY
+let failures = 0
+let retryAt = Number.NEGATIVE_INFINITY
+/** `rev-list --count` timed out once: not asked again this session. */
+let skipRevList = false
+
+/** Forgets the last session's timer, backoff and slow-count state. */
+export function resetGitRefresh() {
+  timer?.cancel()
+  timer = undefined
+  timerDue = Number.POSITIVE_INFINITY
+  isRunning = false
+  stale = false
+  isStaleForced = false
+  lastAt = Number.NEGATIVE_INFINITY
+  failures = 0
+  retryAt = Number.NEGATIVE_INFINITY
+  skipRevList = false
+}
 
 async function runRefresh($: EngineInterface) {
   try {
     const info = await collectGit($)
-    isBackedOff = info === undefined
-    if (info) await update($, git, () => info)
-    // Git could not run: keep what was read before; with nothing read yet,
-    // say there is no repository rather than draw nothing.
-    else await update($, git, g => (g.status === 'unknown' ? { ...EMPTY_GIT, status: 'none' as const, at: g.at } : g))
+    const now = await nowMs($)
+    if (info) {
+      failures = 0
+      retryAt = Number.NEGATIVE_INFINITY
+      await update($, git, () => info)
+      return
+    }
+    failures += 1
+    retryAt = now + Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_MAX_MS)
+    // Git did not answer: keep a repository read before, marked out of date;
+    // with none, say git is unavailable, never "no repository".
+    await update($, git, g =>
+      g.status === 'repo' ? { ...g, isOutdated: true } : { ...EMPTY_GIT, status: 'unavailable' as const, at: now },
+    )
   } catch {
     // Never let git trouble reach the tool call or the turn.
   }
 }
 
-export async function refreshGit($: EngineInterface, force: boolean) {
-  if (inFlight) {
+async function fireRefresh($: EngineInterface, force: boolean) {
+  timer = undefined
+  timerDue = Number.POSITIVE_INFINITY
+  if (isRunning) {
     stale = true
+    isStaleForced ||= force
+    return
+  }
+  isRunning = true
+  try {
+    lastAt = await nowMs($)
+    await runRefresh($)
+  } finally {
+    isRunning = false
+  }
+  if (stale) {
+    const again = isStaleForced
+    stale = false
+    isStaleForced = false
+    await requestGitRefresh($, again)
+  }
+}
+
+/**
+ * Asks for a refresh and returns at once: a timer runs it `DEBOUNCE_MS` from
+ * now (or `delayMs`), later still if a tool call's gap or a backoff says so.
+ * `force` (a turn end, a session start) skips the gap, never the backoff.
+ */
+export async function requestGitRefresh($: EngineInterface, force: boolean, delayMs = DEBOUNCE_MS) {
+  if (isRunning) {
+    stale = true
+    isStaleForced ||= force
     return
   }
   const now = await nowMs($)
-  if (!force && now - lastAt < MIN_GAP_MS) {
-    stale = true
-    return
-  }
-  lastAt = now
-  stale = false
-  const run = runRefresh($)
-  inFlight = run
-  try {
-    await run
-  } finally {
-    inFlight = undefined
-  }
+  let due = now + delayMs
+  if (!force) due = Math.max(due, lastAt + MIN_GAP_MS)
+  if (failures > 0) due = Math.max(due, retryAt)
+  // One timer at a time: one due sooner already covers this request.
+  if (timer && timerDue <= due) return
+  timer?.cancel()
+  timerDue = due
+  timer = $.clock.after(Math.max(0, due - now), () => void fireRefresh($, force).catch(() => undefined))
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
@@ -203,7 +277,8 @@ export const touchesGit = (tool: string, command: string) => EDIT_TOOLS.has(tool
 // ---------- The shared events, called from register.tsx (see hub.ts) ----------
 
 export async function gitSessionStart($: EngineInterface, _e: SessionStartInput) {
-  await refreshGit($, true)
+  resetGitRefresh()
+  await requestGitRefresh($, true, 0)
 }
 
 export function gitTurnStart(_$: EngineInterface, _e: TurnStartInput) {}
@@ -213,16 +288,14 @@ export function gitToolStart(_$: EngineInterface, _e: ToolCallInput) {}
 export async function gitToolEnd($: EngineInterface, e: ToolCallInput, _ran: ToolCallResult) {
   const input = e as unknown as Record<string, unknown>
   if (!touchesGit(String(e.tool), str(input.command))) return
-  if (isBackedOff) stale = true
-  else await refreshGit($, false)
+  await requestGitRefresh($, false)
 }
 
 /** On the main loop, a string returned is shown beneath the answer. */
 export async function gitTurnComplete($: EngineInterface, e: TurnCompleteInput): Promise<string | undefined> {
   if (e.agentId !== undefined) return undefined
-  // A refresh still running started before the turn's last changes: read again after it.
-  if (inFlight) await inFlight
-  await refreshGit($, true)
+  // A read still running started before the turn's last changes: it is read again after it.
+  await requestGitRefresh($, true)
   return undefined
 }
 
@@ -250,6 +323,16 @@ export async function gitPanel($: EngineInterface, el: Els, surface: RenderSurfa
       </Section>
     )
   }
+  if (g.status === 'unavailable') {
+    return (
+      <Section el={el} surface={surface} icon="git" title="Git">
+        <el.Box flexDirection="row" gap={1}>
+          <Icon el={el} surface={surface} name="warning" color={C.gold} />
+          <el.Text color={C.gold}>Git did not answer (too slow, or not installed). Trying again later.</el.Text>
+        </el.Box>
+      </Section>
+    )
+  }
 
   const hasUnpushed = g.unpushedCount > 0
   const isTracking = g.upstream !== undefined && !g.isUpstreamGone
@@ -274,7 +357,7 @@ export async function gitPanel($: EngineInterface, el: Els, surface: RenderSurfa
         </el.Box>
 
         <el.Box flexDirection="row" flexWrap="wrap" gap={1}>
-          {hasUnpushed && <GitChip el={el} surface={surface} icon="push" color={C.orange} text={`${plural(g.unpushedCount, 'unpushed')}`} />}
+          {hasUnpushed && <GitChip el={el} surface={surface} icon="push" color={C.orange} text={g.isCountAtLeast ? `${g.unpushedCount.toLocaleString('en-US')}+ unpushed` : plural(g.unpushedCount, 'unpushed')} />}
           {g.uncommitted > 0 ? (
             <GitChip el={el} surface={surface} icon="dirty" color={C.gold} text={`${plural(g.uncommitted, 'uncommitted')}`} />
           ) : (
@@ -312,6 +395,13 @@ export async function gitPanel($: EngineInterface, el: Els, surface: RenderSurfa
                 and {(g.unpushedCount - g.unpushed.length).toLocaleString('en-US')} more
               </el.Text>
             )}
+          </el.Box>
+        )}
+
+        {g.isOutdated && (
+          <el.Box flexDirection="row" gap={1}>
+            <Icon el={el} surface={surface} name="warning" color={C.gold} />
+            <el.Text color={C.gold}>Git did not answer the latest read: this may be out of date.</el.Text>
           </el.Box>
         )}
 
