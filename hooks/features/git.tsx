@@ -8,7 +8,7 @@ import { verdict } from '../lib'
 import type { IconName } from '../ui/icons'
 import { Icon } from '../ui/icons'
 import type { Els, On } from '../ui/kit'
-import { Heading, str } from '../ui/kit'
+import { Section, str } from '../ui/kit'
 import { C } from '../ui/theme'
 
 const EMPTY_GIT: GitInfo = { status: 'unknown', ahead: 0, behind: 0, unpushed: [], unpushedCount: 0, uncommitted: 0, at: 0 }
@@ -21,13 +21,17 @@ export const doneDismissed = atom({ plugin: 'atlas-hud', key: 'doneDismissed' } 
 
 const MAX_UNPUSHED = 5
 const MIN_GAP_MS = 2000
-const GIT_TIMEOUT_MS = 5000
+const GIT_TIMEOUT_MS = 3000
 
 export const registerGit = (_on: On) => {}
 
 // ---------- Parsing (pure; the tests call these directly) ----------
 
-/** `git status --porcelain=v2 --branch`: branch, upstream, ahead/behind, changed paths. */
+/**
+ * `git status --porcelain=v2 --branch`: branch, upstream, ahead/behind, changed
+ * paths. An upstream that is set but no longer exists (deleted on the remote,
+ * then pruned) comes without its `# branch.ab` line: `isUpstreamGone`.
+ */
 export const parseStatus = (out: string) => {
   let head: string | undefined
   let oid: string | undefined
@@ -35,11 +39,13 @@ export const parseStatus = (out: string) => {
   let ahead = 0
   let behind = 0
   let changes = 0
+  let hasAb = false
   for (const line of out.split('\n')) {
     if (line.startsWith('# branch.head ')) head = line.slice('# branch.head '.length).trim()
     else if (line.startsWith('# branch.oid ')) oid = line.slice('# branch.oid '.length).trim()
     else if (line.startsWith('# branch.upstream ')) upstream = line.slice('# branch.upstream '.length).trim()
     else if (line.startsWith('# branch.ab ')) {
+      hasAb = true
       const m = line.match(/\+(\d+)\s+-(\d+)/)
       if (m) {
         ahead = Number(m[1])
@@ -47,7 +53,7 @@ export const parseStatus = (out: string) => {
       }
     } else if (line.trim() && !line.startsWith('#')) changes += 1
   }
-  return { head, oid, upstream, ahead, behind, changes }
+  return { head, oid, upstream, isUpstreamGone: upstream !== undefined && !hasAb, ahead, behind, changes }
 }
 
 /** `git log --format=%h%x09%s`: one commit per line. */
@@ -62,17 +68,21 @@ export const parseLog = (out: string): GitCommit[] =>
 
 // ---------- Collecting ----------
 
-async function runGit($: EngineInterface, args: string[], cwd: string | undefined) {
+/**
+ * One git command: its output on exit 0; `undefined` on any other exit (not a
+ * repository, no upstream); `null` when git could not run at all (missing,
+ * refused, or killed at the timeout).
+ */
+async function runGit($: EngineInterface, args: string[], cwd: string | undefined): Promise<string | undefined | null> {
   try {
     const r = await $.process.run(['git', ...args], {
       ...(cwd ? { cwd } : {}),
       env: { GIT_OPTIONAL_LOCKS: '0' },
       timeoutMs: GIT_TIMEOUT_MS,
     })
-    return r.exitCode === 0 ? r.stdout : undefined
+    return r.exitCode === 0 && typeof r.stdout === 'string' ? r.stdout : undefined
   } catch {
-    // git missing, or too slow: quiet.
-    return undefined
+    return null
   }
 }
 
@@ -92,57 +102,73 @@ async function nowMs($: EngineInterface) {
   }
 }
 
-/** Reads the repository in the session's directory; `status: 'none'` outside one. */
-export async function collectGit($: EngineInterface): Promise<GitInfo> {
+/**
+ * Reads the repository in the session's directory; `status: 'none'` outside
+ * one. `undefined` when git itself could not run (the caller keeps what it had).
+ */
+export async function collectGit($: EngineInterface): Promise<GitInfo | undefined> {
   // The session's directory, not `session.repo().root`: in a worktree that is
   // the main working tree's root, a different branch.
   const cwd = await sessionCwd($)
   const at = await nowMs($)
   const status = await runGit($, ['status', '--porcelain=v2', '--branch'], cwd)
+  if (status === null) return undefined
   if (status === undefined) return { ...EMPTY_GIT, status: 'none', at }
 
   const s = parseStatus(status)
   const hasCommits = s.oid !== undefined && s.oid !== '(initial)'
   const isDetached = s.head === '(detached)'
-  const range = s.upstream ? ['@{upstream}..HEAD'] : ['HEAD', '--not', '--remotes']
+  // A gone upstream can't be compared against: count what is on no remote.
+  const isTracking = s.upstream !== undefined && !s.isUpstreamGone
+  const range = isTracking ? ['@{upstream}..HEAD'] : ['HEAD', '--not', '--remotes']
 
   const [last, unpushed, count] = hasCommits
     ? await Promise.all([
         runGit($, ['log', '-1', '--format=%h%x09%s'], cwd),
         runGit($, ['log', '--format=%h%x09%s', '-n', String(MAX_UNPUSHED), ...range], cwd),
-        s.upstream ? Promise.resolve(undefined) : runGit($, ['rev-list', '--count', ...range], cwd),
+        isTracking ? Promise.resolve(undefined) : runGit($, ['rev-list', '--count', ...range], cwd),
       ])
     : [undefined, undefined, undefined]
 
-  const lastCommit = last !== undefined ? parseLog(last)[0] : undefined
-  const list = unpushed !== undefined ? parseLog(unpushed) : []
-  const counted = count !== undefined ? Number(count.trim()) : NaN
+  const lastCommit = typeof last === 'string' ? parseLog(last)[0] : undefined
+  const list = typeof unpushed === 'string' ? parseLog(unpushed) : []
+  const counted = typeof count === 'string' && /^\s*\d+\s*$/.test(count) ? Number(count.trim()) : NaN
   return {
     status: 'repo',
     branch: isDetached ? undefined : s.head,
     isDetached,
     headSha: hasCommits ? s.oid?.slice(0, 7) : undefined,
     upstream: s.upstream,
+    isUpstreamGone: s.isUpstreamGone,
     ahead: s.ahead,
     behind: s.behind,
     unpushed: list.slice(0, MAX_UNPUSHED),
-    unpushedCount: s.upstream ? s.ahead : Number.isFinite(counted) ? counted : list.length,
+    unpushedCount: isTracking ? s.ahead : Number.isFinite(counted) ? counted : list.length,
     uncommitted: s.changes,
     lastCommit: lastCommit?.subject || undefined,
     at,
   }
 }
 
-// At most one refresh in flight, and none within 2s of the last; a skipped
-// one leaves the state stale, caught up when the turn completes.
+// At most one refresh in flight, and none within 2s of the last after a tool
+// call; every main-loop turn ends with a forced one, which catches up what was
+// skipped and what changed without a git command or an edit (rm, a formatter,
+// git outside Claude). Once git
+// could not run at all (missing, or too slow), tool calls stop waiting on it
+// until a refresh at the end of a turn or a session start works again.
 let inFlight: Promise<void> | undefined
 let lastAt = Number.NEGATIVE_INFINITY
 let stale = false
+let isBackedOff = false
 
 async function runRefresh($: EngineInterface) {
   try {
     const info = await collectGit($)
-    await update($, git, () => info)
+    isBackedOff = info === undefined
+    if (info) await update($, git, () => info)
+    // Git could not run: keep what was read before; with nothing read yet,
+    // say there is no repository rather than draw nothing.
+    else await update($, git, g => (g.status === 'unknown' ? { ...EMPTY_GIT, status: 'none' as const, at: g.at } : g))
   } catch {
     // Never let git trouble reach the tool call or the turn.
   }
@@ -186,20 +212,25 @@ export function gitToolStart(_$: EngineInterface, _e: ToolCallInput) {}
 
 export async function gitToolEnd($: EngineInterface, e: ToolCallInput, _ran: ToolCallResult) {
   const input = e as unknown as Record<string, unknown>
-  if (touchesGit(String(e.tool), str(input.command))) await refreshGit($, false)
+  if (!touchesGit(String(e.tool), str(input.command))) return
+  if (isBackedOff) stale = true
+  else await refreshGit($, false)
 }
 
 /** On the main loop, a string returned is shown beneath the answer. */
 export async function gitTurnComplete($: EngineInterface, e: TurnCompleteInput): Promise<string | undefined> {
-  if (e.agentId === undefined && stale) await refreshGit($, true)
+  if (e.agentId !== undefined) return undefined
+  // A refresh still running started before the turn's last changes: read again after it.
+  if (inFlight) await inFlight
+  await refreshGit($, true)
   return undefined
 }
 
 // ---------- Drawing ----------
 
-const Chip = ({ el, surface, icon, color, text, isLive }: { el: Els; surface: RenderSurface; icon?: IconName; color: string; text: string; isLive?: boolean }) => (
+const GitChip = ({ el, surface, icon, color, text }: { el: Els; surface: RenderSurface; icon?: IconName; color: string; text: string }) => (
   <el.Box flexDirection="row" gap={1} borderStyle="round" borderColor={color} paddingX={1}>
-    {icon && <Icon el={el} surface={surface} name={icon} color={color} isLive={isLive} />}
+    {icon && <Icon el={el} surface={surface} name={icon} color={color} />}
     <el.Text mono tabular size="footnote" color={color}>
       {text}
     </el.Text>
@@ -214,48 +245,49 @@ export async function gitPanel($: EngineInterface, el: Els, surface: RenderSurfa
   if (g.status === 'unknown') return undefined
   if (g.status === 'none') {
     return (
-      <el.Box flexDirection="row" gap={1}>
-        <Icon el={el} surface={surface} name="git" color={C.text2} />
-        <el.Text color={C.text2} dimColor>
-          No git repository here.
-        </el.Text>
-      </el.Box>
+      <Section el={el} surface={surface} icon="git" title="Git">
+        <el.Text color={C.text2}>No git repository here.</el.Text>
+      </Section>
     )
   }
 
   const hasUnpushed = g.unpushedCount > 0
+  const isTracking = g.upstream !== undefined && !g.isUpstreamGone
+  // A detached HEAD has no upstream by nature: no note for it.
+  const upstreamNote = g.isUpstreamGone
+    ? `Upstream ${g.upstream} is gone${hasUnpushed ? ': these commits are on no remote' : ''}`
+    : !g.upstream && !g.isDetached
+      ? hasUnpushed
+        ? 'No upstream: not pushed anywhere yet'
+        : 'No upstream set'
+      : undefined
   const name = g.isDetached ? `detached at ${g.headSha ?? 'HEAD'}` : (g.branch ?? 'unknown branch')
   return (
-    <el.Box flexDirection="column" gap={1}>
-      <el.Box flexDirection="row" gap={1}>
-        <Icon el={el} surface={surface} name="git" />
-        <Heading el={el}>GIT</Heading>
-      </el.Box>
+    <Section el={el} surface={surface} icon="git" title="Git">
       <el.Box flexDirection="column" gap={1} borderStyle="round" borderColor={C.line} backgroundColor={C.panel} paddingX={1}>
         <el.Box flexDirection="row" flexWrap="wrap" gap={1}>
           <Icon el={el} surface={surface} name="branch" color={C.teal} />
           <el.Text weight="semibold" color={C.text}>
             {name}
           </el.Text>
-          {g.upstream && <el.Text color={C.text2}>tracks {g.upstream}</el.Text>}
+          {g.upstream && !g.isUpstreamGone && <el.Text color={C.text2}>tracks {g.upstream}</el.Text>}
         </el.Box>
 
         <el.Box flexDirection="row" flexWrap="wrap" gap={1}>
-          {hasUnpushed && <Chip el={el} surface={surface} icon="push" color={C.orange} text={`${plural(g.unpushedCount, 'unpushed')}`} />}
+          {hasUnpushed && <GitChip el={el} surface={surface} icon="push" color={C.orange} text={`${plural(g.unpushedCount, 'unpushed')}`} />}
           {g.uncommitted > 0 ? (
-            <Chip el={el} surface={surface} icon="dirty" color={C.gold} text={`${plural(g.uncommitted, 'uncommitted')}`} />
+            <GitChip el={el} surface={surface} icon="dirty" color={C.gold} text={`${plural(g.uncommitted, 'uncommitted')}`} />
           ) : (
-            <Chip el={el} surface={surface} icon="clean" color={C.green} text="clean" />
+            <GitChip el={el} surface={surface} icon="clean" color={C.green} text="clean" />
           )}
-          {g.upstream && g.ahead > 0 && <Chip el={el} surface={surface} color={C.teal} text={`↑${g.ahead} ahead`} />}
-          {g.upstream && g.behind > 0 && <Chip el={el} surface={surface} color={C.gold} text={`↓${g.behind} behind`} />}
-          {g.upstream && !hasUnpushed && g.behind === 0 && <Chip el={el} surface={surface} icon="check" color={C.green} text="in sync" />}
+          {isTracking && g.behind > 0 && <GitChip el={el} surface={surface} color={C.gold} text={`↓${g.behind} behind`} />}
+          {isTracking && !hasUnpushed && g.behind === 0 && <GitChip el={el} surface={surface} icon="check" color={C.green} text="in sync" />}
         </el.Box>
 
-        {!g.upstream && (
+        {upstreamNote && (
           <el.Box flexDirection="row" gap={1}>
             <Icon el={el} surface={surface} name="push" color={C.orange} />
-            <el.Text color={C.orange}>No upstream: not pushed anywhere yet</el.Text>
+            <el.Text color={C.orange}>{upstreamNote}</el.Text>
           </el.Box>
         )}
 
@@ -290,7 +322,7 @@ export async function gitPanel($: EngineInterface, el: Els, surface: RenderSurfa
           </el.Box>
         )}
       </el.Box>
-    </el.Box>
+    </Section>
   )
 }
 

@@ -63,6 +63,8 @@ export type GitInfo = {
   isDetached?: boolean
   headSha?: string
   upstream?: string
+  /** The upstream is set but no longer exists (deleted on the remote, pruned). */
+  isUpstreamGone?: boolean
   ahead: number
   behind: number
   /** The newest unpushed commits, at most 5. */
