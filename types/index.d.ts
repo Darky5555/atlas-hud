@@ -54,6 +54,24 @@ export type Tab = 'overview' | 'work' | 'agents' | 'timeline'
 
 // ---- Git feature types (git.tsx) ----
 
+export type GitCommit = { sha: string; subject: string }
+
+export type GitInfo = {
+  /** unknown: not read yet; none: not a repository, or git is missing. */
+  status: 'unknown' | 'none' | 'repo'
+  branch?: string
+  isDetached?: boolean
+  headSha?: string
+  upstream?: string
+  ahead: number
+  behind: number
+  /** The newest unpushed commits, at most 5. */
+  unpushed: GitCommit[]
+  unpushedCount: number
+  uncommitted: number
+  lastCommit?: string
+  at: number
+}
 
 
 // ---- Timeline feature types (timeline.tsx) ----
@@ -78,6 +96,8 @@ declare module 'claude-code' {
 
 
       // ---- Git feature state ----
+      git: Shaped<GitInfo>
+      doneDismissed: string[]
 
 
       // ---- Timeline feature state ----
