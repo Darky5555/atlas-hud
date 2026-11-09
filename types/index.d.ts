@@ -74,6 +74,12 @@ export type AgentRun = {
   /** The agent whose loop spawned it; absent when the main loop did. */
   parentId?: string
   isTeammate?: boolean
+  /**
+   * Set once `agent.spawn` or `$.agent.list()` named it: only then is it shown or
+   * counted. The engine's own forks (compaction, memory) carry ids no list
+   * names; their records stay hidden and go when their turn ends.
+   */
+  confirmed?: true
   status: AgentRunStatus
   /**
    * Whether the tab last heard this loop's turn start (true) or end (false);

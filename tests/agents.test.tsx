@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { AgentInfo } from 'claude-code'
+import type { AgentInfo, On } from 'claude-code'
 
-import { bound, elapsed, listStatus, MAX_AGENTS, reportLines, tokenCount, treeOf } from '../hooks/features/agents'
+import { bound, clockTime, counts, elapsed, listStatus, MAX_AGENTS, reportLines, treeOf } from '../hooks/features/agents'
+import { compact } from '../hooks/features/timeline-lib'
 import type { AgentRun } from '../types'
 
 const NOW = Date.parse('2026-11-05T12:00:00Z')
@@ -24,7 +25,22 @@ const PANE = {
 
 const USAGE = { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm' }
 
-const run = (id: string, over: Partial<AgentRun> = {}): AgentRun => ({ id, status: 'running', startedAt: 0, tools: 0, tokens: 0, at: 0, ...over })
+/** The Agents tab's header. */
+const HEADER = /^\d+ running( · \d+ waiting)? · \d+ done · \d+ failed$/
+/** A running agent's start on Svg surfaces, in any time zone. */
+const SINCE = /^since \d{1,2}:\d{2}\s?[AP]M · /
+
+/** The Agents record as last written, seen on its way to the host. */
+const watchRecord = (on: On) => {
+  const box: { list: AgentRun[] } = { list: [] }
+  on('state.set', { plugin: 'atlas-hud', key: 'agents' }, (_, e, next) => {
+    box.list = (e.value as { value: AgentRun[] }).value
+    return next(e)
+  })
+  return box
+}
+
+const run = (id: string, over: Partial<AgentRun> = {}): AgentRun => ({ id, status: 'running', confirmed: true, startedAt: 0, tools: 0, tokens: 0, at: 0, ...over })
 
 test('elapsed time reads in seconds, minutes and hours', async () => {
   expect(elapsed(0)).toBe('0s')
@@ -32,10 +48,11 @@ test('elapsed time reads in seconds, minutes and hours', async () => {
   expect(elapsed(185_000)).toBe('3m 05s')
   expect(elapsed(3_840_000)).toBe('1h 04m')
   expect(elapsed(-5)).toBe('0s')
-  expect(tokenCount(860)).toBe('860')
-  expect(tokenCount(1200)).toBe('1.2k')
-  expect(tokenCount(48_300)).toBe('48k')
-  expect(tokenCount(1_250_000)).toBe('1.3M')
+  // Token counts use the Timeline's formatter: one label per scale.
+  expect(compact(860)).toBe('860')
+  expect(compact(1200)).toBe('1.2k')
+  expect(compact(48_300)).toBe('48k')
+  expect(compact(1_250_000)).toBe('1.3M')
 })
 
 test('a report keeps its first two lines', async () => {
@@ -154,7 +171,7 @@ test("agents' runs show as a tree with status, tools, time, tokens and report, o
     expect((await ui.find({ type: 'Text', text: /running ·/ }))?.text).toBe('1 running · 1 waiting · 1 done · 1 failed')
 
     await ui.press({ key: 'tab-agents' })
-    expect((await ui.find({ type: 'Text', text: /running · \d+ done/ }))?.text).toBe('1 running · 1 done · 1 failed')
+    expect((await ui.find({ type: 'Text', text: HEADER }))?.text).toBe('1 running · 1 waiting · 1 done · 1 failed')
 
     // Names, types and descriptions, the tree in order: running first, then the newest
     // (scout and watcher were first seen at once: kept in the order seen), a child under its parent.
@@ -176,7 +193,9 @@ test("agents' runs show as a tree with status, tools, time, tokens and report, o
     // Time, tool calls and tokens.
     expect(texts.includes('42s · 1 tool · 1.2k tok')).toBe(true)
     expect(texts.includes('42s · 2 tools · 0 tok')).toBe(true)
-    expect(texts.includes('0s · 1 tool · 0 tok')).toBe(true)
+    // A running agent: its elapsed time in the terminal, its start on Svg surfaces.
+    if (surface === 'terminal') expect(texts.includes('0s · 1 tool · 0 tok')).toBe(true)
+    else expect(texts.some(t => SINCE.test(t ?? '') && t?.endsWith(' · 1 tool · 0 tok'))).toBe(true)
 
     // The tool running now, and the first two lines of a report.
     expect(texts.includes('Grep')).toBe(true)
@@ -196,7 +215,7 @@ test("agents' runs show as a tree with status, tools, time, tokens and report, o
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.includes('STOPPED')).toBe(true)
   expect(texts.includes('Grep')).toBe(false)
-  expect((await ui.find({ type: 'Text', text: /running · \d+ done/ }))?.text).toBe('0 running · 1 done · 2 failed')
+  expect((await ui.find({ type: 'Text', text: HEADER }))?.text).toBe('0 running · 1 waiting · 1 done · 2 failed')
   await ui.press({ key: 'tab-overview' })
   await ui.unmount()
 })
@@ -220,7 +239,7 @@ test("a teammate's own turns outrank a list that lags them", async ($, on) => {
     await ui.press({ key: 'tab-agents' })
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
     expect(texts.includes(status)).toBe(true)
-    expect((await ui.find({ type: 'Text', text: /running · \d+ done/ }))?.text).toBe(header)
+    expect((await ui.find({ type: 'Text', text: HEADER }))?.text).toBe(header)
     await ui.press({ key: 'tab-overview' })
     await ui.unmount()
   }
@@ -233,10 +252,141 @@ test("a teammate's own turns outrank a list that lags them", async ($, on) => {
   mate.status = 'running'
   await $.turn.complete({ answer: 'Lint fixed.', durationMs: 5000, isAborted: false, turnId: 'w1', agentId: 'tm2', reason: 'answer' })
   await $.turn.start({ text: 'next', turnId: 'm1' })
-  await shows('IDLE', '0 running · 0 done · 0 failed', '1 waiting')
+  // The header counts it as Overview does.
+  await shows('IDLE', '0 running · 1 waiting · 0 done · 0 failed', '1 waiting')
 
   // An end the list reports still lands.
   mate.status = 'killed'
   await $.turn.start({ text: 'again', turnId: 'm2' })
   await shows('STOPPED', '0 running · 0 done · 1 failed', '1 failed')
+})
+
+test("the engine's own forks stay out of the tab; a spawned or listed agent shows", async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const listed: AgentInfo[] = []
+  on('agent.list', () => ({ value: listed }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ model: 'm', agentId: 'sub1' }))
+  const record = watchRecord(on)
+
+  // A compaction fork: its loop's events carry an id no list or spawn names.
+  await $.turn.start({ text: 'Summarise', turnId: 'f1', agentId: 'fork1' })
+  await $.tool.call({ tool: 'Read', file_path: '/x/a.ts', agentId: 'fork1' })
+  // A model-spawned subagent whose turn starts before the spawn's answer is heard.
+  await $.turn.start({ text: 'Look around', turnId: 's1', agentId: 'sub1' })
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: /^AGENTS$/ })).toBe(undefined)
+    await ui.press({ key: 'tab-agents' })
+    expect((await ui.find({ type: 'Text', text: HEADER }))?.text).toBe('0 running · 0 done · 0 failed')
+    expect((await ui.find({ type: 'Text', text: /^No agents yet/ }))?.text).toBe('No agents yet.')
+    await ui.press({ key: 'tab-overview' })
+    await ui.unmount()
+  }
+
+  // The spawn confirms the subagent; a loop the list names (a forked skill) shows too.
+  await $.agent.spawn({
+    tool_use_id: 'u1',
+    prompt: 'Look around',
+    description: 'Look around',
+    subagentType: 'Explore',
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'm',
+    background: true,
+    fork: false,
+  })
+  listed.push({ id: 'skill1', description: 'Run the skill', type: 'fork', status: 'running' })
+  await $.turn.start({ text: 'Run the skill', turnId: 'k1', agentId: 'skill1' })
+  // The fork ends: its record goes with it.
+  await $.turn.complete({ answer: 'Summary.', durationMs: 1000, isAborted: false, turnId: 'f1', agentId: 'fork1', reason: 'answer' })
+  expect(counts(record.list)).toEqual({ running: 2, waiting: 0, done: 0, failed: 0 })
+  expect(record.list.some(a => a.id === 'fork1')).toBe(false)
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /running/ }))?.text).toBe('2 running')
+    await ui.press({ key: 'tab-agents' })
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect((await ui.find({ type: 'Text', text: HEADER }))?.text).toBe('2 running · 0 done · 0 failed')
+    expect(texts.includes('Explore')).toBe(true)
+    expect(texts.includes('Run the skill')).toBe(true)
+    expect(texts.includes('agent')).toBe(false)
+    await ui.press({ key: 'tab-overview' })
+    await ui.unmount()
+  }
+})
+
+test('a spawn heard after its agent ended leaves the end standing; a resume runs again', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  on('agent.list', () => ({ value: [{ id: 'q1', description: 'Quick look', type: 'Explore', status: 'running' }] }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('agent.spawn', () => ({ model: 'm', agentId: 'q1' }))
+  const record = watchRecord(on)
+  const spawn = (resume?: { agentId: string }) =>
+    $.agent.spawn({
+      tool_use_id: 'u1',
+      prompt: 'Quick look',
+      description: 'Quick look',
+      subagentType: 'Explore',
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'm',
+      background: true,
+      fork: false,
+      ...(resume ? { resume } : {}),
+    })
+  const status = async () => record.list.find(a => a.id === 'q1')?.status
+
+  await $.turn.start({ text: 'Quick look', turnId: 'q', agentId: 'q1' })
+  await $.turn.complete({ answer: 'Done.', durationMs: 300, isAborted: false, turnId: 'q', agentId: 'q1', reason: 'answer' })
+  await spawn()
+  expect(await status()).toBe('completed')
+  await spawn({ agentId: 'q1' })
+  expect(await status()).toBe('running')
+})
+
+test("a running agent's time: elapsed and moving in the terminal, its start on Svg surfaces", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  on('agent.list', () => ({ value: [{ id: 'r1', description: 'Long build', type: 'general-purpose', status: 'running', name: 'builder' }] }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('tool.call', async () => {
+    await clock.sleep(60_000)
+    return { result: {} }
+  })
+  await $.turn.start({ text: 'Long build', turnId: 'r', agentId: 'r1' })
+  // A long tool call: no agent event while it runs.
+  const call = $.tool.call({ tool: 'Bash', command: 'make', agentId: 'r1' })
+
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await term.press({ key: 'tab-agents' })
+  expect((await term.find({ type: 'Text', text: /· 1 tool ·/ }))?.text).toBe('0s · 1 tool · 0 tok')
+  await clock.advance(5000)
+  expect((await term.find({ type: 'Text', text: /· 1 tool ·/ }))?.text).toBe('5s · 1 tool · 0 tok')
+
+  for (const surface of ['desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab-agents' })
+    const stats = (await ui.find({ type: 'Text', text: /· 1 tool ·/ }))?.text ?? ''
+    expect(SINCE.test(stats)).toBe(true)
+    expect(stats.startsWith(`since ${clockTime(NOW)} · `)).toBe(true)
+    await ui.press({ key: 'tab-overview' })
+    await ui.unmount()
+  }
+
+  await clock.advance(60_000)
+  await call
+  await $.turn.complete({ answer: 'Built.', durationMs: 65_000, isAborted: false, turnId: 'r', agentId: 'r1', reason: 'answer' })
+  // Ended: its final duration, on every surface.
+  await term.press({ key: 'tab-agents' })
+  expect((await term.find({ type: 'Text', text: /· 1 tool ·/ }))?.text).toBe('1m 05s · 1 tool · 0 tok')
+  await term.press({ key: 'tab-overview' })
+  await term.unmount()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'tab-agents' })
+  expect((await ui.find({ type: 'Text', text: /· 1 tool ·/ }))?.text).toBe('1m 05s · 1 tool · 0 tok')
+  await ui.press({ key: 'tab-overview' })
+  await ui.unmount()
 })

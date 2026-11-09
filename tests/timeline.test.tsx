@@ -107,6 +107,15 @@ test('token helpers: counts, compact numbers, sparkline, chart', async () => {
   expect(compact(1200)).toBe('1.2k')
   expect(compact(24_000)).toBe('24k')
   expect(compact(1_300_000)).toBe('1.3M')
+  // Rounded first, then the unit picked: no "1000k", one label per scale.
+  expect(compact(999.6)).toBe('1k')
+  expect(compact(9_999)).toBe('10k')
+  expect(compact(10_000)).toBe('10k')
+  expect(compact(999_500)).toBe('1M')
+  expect(compact(999_999)).toBe('1M')
+  expect(compact(999_499)).toBe('999k')
+  expect(compact(1_250_000)).toBe('1.3M')
+  expect(compact(-1200)).toBe('-1.2k')
   expect(sparkline([24_000, 3000, undefined])).toBe('█▂·')
   expect(sparkline([0, 0])).toBe('▁▁')
 

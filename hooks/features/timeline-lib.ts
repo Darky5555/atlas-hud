@@ -25,13 +25,26 @@ export const tokensOf = (u: unknown): TurnTokens | undefined => {
   }
 }
 
-/** 950, 1.2k, 48k, 1.3M. */
+const UNITS = [
+  [1, ''],
+  [1000, 'k'],
+  [1_000_000, 'M'],
+] as const
+
+/**
+ * 950, 1.2k, 48k, 1.3M: one decimal under ten of a unit. Rounded first, then
+ * the unit picked, so 999,600 reads 1M (not 1000k).
+ */
 export const compact = (n: number) => {
   if (!Number.isFinite(n)) return '0'
   const a = Math.abs(n)
-  if (a < 1000) return String(Math.round(n))
-  if (a < 1_000_000) return `${(n / 1000).toFixed(a < 10_000 ? 1 : 0).replace(/\.0$/, '')}k`
-  return `${(n / 1_000_000).toFixed(a < 10_000_000 ? 1 : 0).replace(/\.0$/, '')}M`
+  for (let i = 0; i < UNITS.length; i++) {
+    const [size, unit] = UNITS[i]!
+    const digits = size > 1 && a / size < 10 ? 1 : 0
+    const r = Math.round((a / size) * 10 ** digits) / 10 ** digits
+    if (r < 1000 || i === UNITS.length - 1) return `${n < 0 && r > 0 ? '-' : ''}${r.toFixed(digits).replace(/\.0$/, '')}${unit}`
+  }
+  return '0'
 }
 
 /** The tool calls a turn made, or undefined for a turn stored before they were counted. */

@@ -6,7 +6,9 @@
 // started), the shared events with `agentId` (turns, tools, usage, reports)
 // and `$.agent.list()` (the engine's own view, merged in at each turn's start
 // and end). The engine drops an agent from its list soon after it ends, so the
-// tab keeps its own record, bounded to the last 40.
+// tab keeps its own record, bounded to the last 40. Only an agent the tab
+// confirmed (named by `agent.spawn` or the list) is shown or counted: the
+// engine's own forks (compaction, memory) carry ids no list names.
 import { atom, read, update } from 'claude-code'
 import type {
   AgentInfo,
@@ -25,10 +27,11 @@ import type {
 import type { AgentRun, AgentRunStatus } from '../../types'
 import { guard } from '../hub'
 import type { IconName } from '../ui/icons'
-import { Icon } from '../ui/icons'
+import { Icon, iconFrame } from '../ui/icons'
 import type { Els, On } from '../ui/kit'
 import { Section } from '../ui/kit'
 import { C } from '../ui/theme'
+import { compact } from './timeline-lib'
 
 export const agents = atom({ plugin: 'atlas-hud', key: 'agents' } as const, [] as AgentRun[], { shape: 'agents-1' })
 
@@ -58,12 +61,8 @@ export const elapsed = (ms: number) => {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
 
-/** A token count: "860", "1.2k", "48k", "1.2M". */
-export const tokenCount = (n: number) => {
-  if (!Number.isFinite(n) || n < 1000) return String(Math.max(0, Math.round(Number.isFinite(n) ? n : 0)))
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
-  return `${(n / 1_000_000).toFixed(1)}M`
-}
+/** A clock time ("2:02 PM"), as the Timeline tab writes one. */
+export const clockTime = (ms: number) => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 
 /** Every token a turn's requests counted: input, cache reads and writes, output. */
 export const usageTokens = (u: TurnUsage | undefined) =>
@@ -85,9 +84,12 @@ export type AgentKind = 'running' | 'waiting' | 'done' | 'failed'
 export const kindOf = (s: AgentRunStatus): AgentKind =>
   s === 'running' || s === 'pending' ? 'running' : s === 'completed' ? 'done' : s === 'failed' || s === 'killed' ? 'failed' : 'waiting'
 
+/** The records the tab shows: those `agent.spawn` or `$.agent.list()` confirmed. */
+export const shown = (list: readonly AgentRun[]) => list.filter(a => a.confirmed === true)
+
 export const counts = (list: readonly AgentRun[]) => {
   const c = { running: 0, waiting: 0, done: 0, failed: 0 }
-  for (const a of list) c[kindOf(a.status)] += 1
+  for (const a of shown(list)) c[kindOf(a.status)] += 1
   return c
 }
 
@@ -124,6 +126,7 @@ const sameRecord = (x: AgentRun, y: AgentRun) =>
   x.description === y.description &&
   x.parentId === y.parentId &&
   x.isTeammate === y.isTeammate &&
+  x.confirmed === y.confirmed &&
   x.status === y.status &&
   x.endedAt === y.endedAt
 
@@ -150,7 +153,7 @@ export const mergeList = (list: AgentRun[], infos: readonly AgentInfo[], now: nu
     const known = out.find(a => a.id === info.id)
     const merged = (a: AgentRun): AgentRun => {
       const status = listStatus(known, info.status)
-      const r: AgentRun = { ...a, status }
+      const r: AgentRun = { ...a, status, confirmed: true }
       if (info.name) r.name = info.name
       if (info.type) r.type = info.type
       if (info.description) r.description = info.description
@@ -165,8 +168,9 @@ export const mergeList = (list: AgentRun[], infos: readonly AgentInfo[], now: nu
   return out
 }
 
-/** The tree by parent: each agent once, with its depth; one whose parent is not kept is a root. */
-export const treeOf = (list: readonly AgentRun[]) => {
+/** The tree by parent of the shown agents: each once, with its depth; one whose parent is not shown is a root. */
+export const treeOf = (all: readonly AgentRun[]) => {
+  const list = shown(all)
   const ids = new Set(list.map(a => a.id))
   const kids = new Map<string, AgentRun[]>()
   const roots: AgentRun[] = []
@@ -248,9 +252,11 @@ export async function agentsSpawned($: EngineInterface, e: AgentSpawnInput, r: A
   const now = await nowMs($)
   await update($, agents, l =>
     upsert(l, id, now, a => {
-      // A resumed run starts its clock again.
+      // A resumed run starts its clock again. An end the tab already heard
+      // (a fast agent's, before this continuation ran) stands.
       const out: AgentRun = e.resume ? { ...without(a, 'endedAt', 'tool', 'turnOpen'), startedAt: now } : { ...a }
-      out.status = 'running'
+      if (e.resume || (a.turnOpen !== false && !isEnded(a.status))) out.status = 'running'
+      out.confirmed = true
       if (e.name) out.name = e.name
       if (e.subagentType) out.type = e.subagentType
       if (e.description) out.description = e.description
@@ -316,22 +322,33 @@ export async function agentsTurnComplete($: EngineInterface, e: TurnCompleteInpu
     )
   }
   await syncList($)
+  // A loop neither the spawn nor the list named (an engine fork) leaves with its turn.
+  if (id !== undefined) await update($, agents, l => (l.some(a => a.id === id && a.confirmed !== true) ? l.filter(a => a.id !== id) : l))
   return undefined
 }
 
 // ---------- Drawing ----------
 
-const AgentRow = ({ el, surface, a, depth, now }: { el: Els; surface: RenderSurface; a: AgentRun; depth: number; now: number }) => {
+/**
+ * A running agent's time: in the terminal its elapsed time, kept moving by the
+ * frame ticker its view reads; on Svg surfaces, which do not redraw on a ticker,
+ * its start ("since 2:02 PM"). An ended one's final duration everywhere.
+ */
+const timeOf = (a: AgentRun, isLive: boolean, surface: RenderSurface, now: number) =>
+  isLive ? (surface === 'terminal' ? elapsed(now - a.startedAt) : `since ${clockTime(a.startedAt)}`) : elapsed((a.endedAt ?? now) - a.startedAt)
+
+type RowProps = { el: Els; surface: RenderSurface; a: AgentRun; depth: number; now: number; frame?: number }
+
+const AgentRow = ({ el, surface, a, depth, now, frame }: RowProps) => {
   const kind = kindOf(a.status)
   const color = STATUS_COLOR[kind]
   const isLive = kind === 'running'
-  const took = (isLive ? now : (a.endedAt ?? now)) - a.startedAt
-  const stats = [elapsed(took), `${a.tools.toLocaleString('en-US')} ${a.tools === 1 ? 'tool' : 'tools'}`, `${tokenCount(a.tokens)} tok`].join(' · ')
+  const stats = [timeOf(a, isLive, surface, now), `${a.tools.toLocaleString('en-US')} ${a.tools === 1 ? 'tool' : 'tools'}`, `${compact(a.tokens)} tok`].join(' · ')
   return (
     <el.Box flexDirection="column" gap={0} paddingLeft={depth * 2}>
       <el.Box flexDirection="row" gap={1} flexWrap="wrap">
         {depth > 0 && <el.Text color={C.line2}>└</el.Text>}
-        <Icon el={el} surface={surface} name={STATUS_ICON[kind]} color={color} isLive={isLive} />
+        <Icon el={el} surface={surface} name={STATUS_ICON[kind]} color={color} isLive={isLive} frame={frame} />
         <el.Text weight="semibold" color={C.violet}>
           {a.name ?? a.type ?? 'agent'}
         </el.Text>
@@ -347,7 +364,7 @@ const AgentRow = ({ el, surface, a, depth, now }: { el: Els; surface: RenderSurf
         {a.description && <el.Text color={C.text}>{a.description}</el.Text>}
         {isLive && a.tool && (
           <el.Box flexDirection="row" gap={1}>
-            <Icon el={el} surface={surface} name={toolIcon(a.tool)} color={C.teal} isLive />
+            <Icon el={el} surface={surface} name={toolIcon(a.tool)} color={C.teal} isLive frame={frame} />
             <el.Text mono size="footnote" color={C.teal}>
               {a.tool}
             </el.Text>
@@ -363,22 +380,34 @@ const AgentRow = ({ el, surface, a, depth, now }: { el: Els; surface: RenderSurf
   )
 }
 
+/**
+ * The terminal's icon frame while an agent runs, read so its view redraws as it
+ * steps; undefined otherwise. Svg surfaces never read it: a redraw every 500 ms
+ * would re-create their interactive frames.
+ */
+async function liveFrame($: EngineInterface, surface: RenderSurface, running: number) {
+  return surface === 'terminal' && running > 0 ? await iconFrame($) : undefined
+}
+
 /** The Agents tab. */
 export async function agentsView($: EngineInterface, el: Els, surface: RenderSurface) {
   const list = await read($, agents)
-  const now = await nowMs($)
   const c = counts(list)
+  // Terminal, while one runs: the frame ticker redraws its elapsed time and moves its glyph.
+  const frame = await liveFrame($, surface, c.running)
+  const now = await nowMs($)
   const header = (
     <el.Text mono tabular size="caption" color={C.text2}>
-      {`${c.running} running · ${c.done} done · ${c.failed} failed`}
+      {`${c.running} running${c.waiting ? ` · ${c.waiting} waiting` : ''} · ${c.done} done · ${c.failed} failed`}
     </el.Text>
   )
+  const tree = treeOf(list)
   return (
     <Section el={el} surface={surface} icon="agents" title="Agents" accent={C.violet} right={header}>
-      {list.length ? (
+      {tree.length ? (
         <el.Box flexDirection="column" gap={1}>
-          {treeOf(list).map(({ agent, depth }) => (
-            <AgentRow el={el} surface={surface} a={agent} depth={depth} now={now} />
+          {tree.map(({ agent, depth }) => (
+            <AgentRow el={el} surface={surface} a={agent} depth={depth} now={now} frame={frame} />
           ))}
         </el.Box>
       ) : (
@@ -395,9 +424,10 @@ export async function agentsView($: EngineInterface, el: Els, surface: RenderSur
 
 /** One line for Overview ("2 running · 5 done"); undefined when there are no agents. */
 export async function agentsSummary($: EngineInterface, el: Els, surface: RenderSurface): Promise<any> {
-  const list = await read($, agents)
+  const list = shown(await read($, agents))
   if (!list.length) return undefined
   const c = counts(list)
+  const frame = await liveFrame($, surface, c.running)
   const parts: string[] = []
   if (c.running) parts.push(`${c.running} running`)
   if (c.waiting) parts.push(`${c.waiting} waiting`)
@@ -405,7 +435,7 @@ export async function agentsSummary($: EngineInterface, el: Els, surface: Render
   if (c.failed) parts.push(`${c.failed} failed`)
   return (
     <el.Box flexDirection="row" gap={1}>
-      <Icon el={el} surface={surface} name="agents" color={C.violet} isLive={c.running > 0} />
+      <Icon el={el} surface={surface} name="agents" color={C.violet} isLive={c.running > 0} frame={frame} />
       <el.Text mono size="caption" weight="bold" color={C.violet}>
         AGENTS
       </el.Text>
