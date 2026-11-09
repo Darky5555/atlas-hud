@@ -170,7 +170,7 @@ export const register: Register = on => {
     else body = await timelineView($, el, e.surface)
 
     return (
-      <PaneFrame el={el} surface={e.surface} tabs={tabs} current={current} onTab={k => update($, tab, () => k as Tab)}>
+      <PaneFrame el={el} surface={e.surface} tabs={tabs} current={current} columns={e.props.bodyColumns} onTab={k => update($, tab, () => k as Tab)}>
         {body}
       </PaneFrame>
     )
