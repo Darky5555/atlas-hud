@@ -287,3 +287,14 @@ test('a proposed decision waits above the prompt and Keep sends it to Claude', a
     expect(kept?.text.includes(`- no guards on ${surface}`)).toBe(true)
   }
 })
+
+test('/hud says when the pane is open but no surface draws it', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'hud' } }))
+  let placed = false
+  on('ui.open', () => ({ value: placed ? { isPlaced: true } : { isPlaced: false, reason: 'the attached surfaces place no panes' } }))
+  const notDrawn = await $.command.run({ command: 'hud' })
+  expect(notDrawn.text).toBe('Atlas HUD is open but not drawn here: the attached surfaces place no panes')
+  placed = true
+  const drawn = await $.command.run({ command: 'hud' })
+  expect(drawn.text).toBe('Atlas HUD opened.')
+})

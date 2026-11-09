@@ -123,8 +123,10 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'hud' }, async $ => {
-    await openPane($)
-    return { text: 'Atlas HUD opened.' }
+    const opened = await openPane($)
+    // Say what the engine said: a surface that places no panes keeps it undrawn.
+    if (opened.isPlaced) return { text: 'Atlas HUD opened.' }
+    return { text: `Atlas HUD is open but not drawn here: ${opened.reason}` }
   })
 
   // The band above the prompt: what needs an answer or a look, stacked.
