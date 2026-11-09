@@ -5,6 +5,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Tab } from '../types'
 import {
   agentsSessionStart,
+  agentsSummary,
   agentsToolEnd,
   agentsToolStart,
   agentsTurnComplete,
@@ -155,9 +156,11 @@ export const register: Register = on => {
 
     let body
     if (current === 'overview') {
+      const agentsLine = await agentsSummary($, el, e.surface)
       const git = await gitPanel($, el, e.surface)
       body = (
         <el.Box flexDirection="column" gap={1}>
+          {agentsLine}
           {await usageView($, el, now, e.surface)}
           {git}
         </el.Box>
