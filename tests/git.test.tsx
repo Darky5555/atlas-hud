@@ -606,6 +606,38 @@ test('a failing git never reaches the tool call or the turn, and is retried on a
   await back.unmount()
 })
 
+test('a git that did not answer is retried by itself while the session is idle', async ($, on) => {
+  const world: World = { calls: [], repo: { isMissing: true } }
+  const clock = engine(on, world)
+  await start($, clock)
+  expect(world.calls.length).toBe(1)
+
+  // No tool call and no turn from here on: the retries come on their own, 10s then 20s apart.
+  await clock.advance(10_000 - 1000)
+  expect(world.calls.length).toBe(1)
+  await clock.advance(1000 + SOON)
+  expect(world.calls.length).toBe(2)
+  await clock.advance(20_000)
+  expect(world.calls.length).toBe(3)
+
+  // Git answers again: the next retry (40s on) reads it, and the panel recovers.
+  world.repo = { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'abc1234', subject: 'Back' }], unpushed: 0 }
+  await clock.advance(40_000 + 3000)
+  expect(statusCalls(world)).toBe(4)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const t = await texts(ui)
+    expect(t).toContain('in sync')
+    expect(t.some(x => /did not answer/.test(x))).toBe(false)
+    await ui.unmount()
+  }
+
+  // Once it works, an idle session asks nothing more of git.
+  const after = world.calls.length
+  await clock.advance(10 * 60_000)
+  expect(world.calls.length).toBe(after)
+})
+
 test('a git that exits non-zero on a later read keeps the tool call whole', async ($, on) => {
   const world: World = { calls: [], repo: { branch: 'main', upstream: 'origin/main', commits: [{ sha: 'abc1234', subject: 'x' }] } }
   const clock = engine(on, world)

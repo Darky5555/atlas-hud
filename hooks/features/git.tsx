@@ -168,9 +168,9 @@ export async function collectGit($: EngineInterface): Promise<GitInfo | undefine
 // request that comes while one runs is read once more after it settles (the
 // end of a turn's read catches what changed without a git command or an edit:
 // rm, a formatter, git outside Claude). When git does not answer at all (too
-// slow, or missing), the panel says so and reads are put off on a growing
-// interval (10s, 20s, 40s ... 5 min) until one works again. The panel redraws
-// when the atom is written.
+// slow, or missing), the panel says so and it is read again by itself on a
+// growing interval (10s, 20s, 40s ... 5 min) until one works, idle or not.
+// The panel redraws when the atom is written.
 
 const DEBOUNCE_MS = 300
 const RETRY_BASE_MS = 10_000
@@ -244,6 +244,10 @@ async function fireRefresh($: EngineInterface, force: boolean) {
     stale = false
     isStaleForced = false
     await requestGitRefresh($, again)
+  } else if (failures > 0) {
+    // Git did not answer: try again by itself once the backoff is over, so an
+    // idle session's panel recovers without waiting for a tool call or a turn.
+    await requestGitRefresh($, true)
   }
 }
 
