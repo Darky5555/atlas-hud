@@ -154,6 +154,8 @@ declare module 'claude-code' {
 
 
       // ---- Theme feature state ----
+      /** The terminal's live-icon frame (icons.tsx); steps only while a turn runs. */
+      iconFrame: number
 
 
     }
